@@ -9,6 +9,7 @@
      POST /spotify/connect        {refresh_token}  → store a Spotify login (from the app's PKCE sign-in)
      POST /spotify/disconnect     → forget the Spotify login (the library stays)
      GET  /spotify/token          → a fresh Spotify access token (for playback in the app)
+     POST /youtube/playlists      {add: link} | {remove: id}  → the YouTube playlists to follow (API-key mode)
      POST /youtube/start          {return}  → a Google sign-in address (the app opens it)
      GET  /youtube/callback       ← Google sends you back here; the Worker keeps the login, then returns you to the app
      POST /youtube/disconnect     → forget the YouTube login (the library stays)
@@ -20,7 +21,10 @@
      Text:    ALLOWED_ORIGINS    e.g. https://mixtape.example.com,http://127.0.0.1:8000
               SPOTIFY_CLIENT_ID  from developer.spotify.com (not secret)
               GOOGLE_CLIENT_ID   from Google Cloud → Credentials (not secret)
-     Secret:  GOOGLE_CLIENT_SECRET  the matching client secret (only here, never in the app)
+     Secret:  YT_API_KEY         a Google API key for the YouTube Data API (read-only, no sign-in). Mixtape
+                                 then reads the Unlisted/Public playlists whose links you add in the app.
+     Secret:  GOOGLE_CLIENT_SECRET  only for the optional Google sign-in (blocked on accounts with
+                                 Advanced Protection; then API-key mode is the way)
      Binding: DB                 a D1 database
      Trigger: cron  0,15,30,45 * * * *   (Settings → Triggers → Cron)
 
@@ -236,6 +240,10 @@ async function spStep(env, d, ctx) {
 }
 
 /* ---------- YouTube Music (YouTube Data API v3) ----------
+   Two modes. API-key mode (YT_API_KEY, the one in use): no Google sign-in; the Worker reads the
+   playlists you added by link (kv 'yt.lists'), which must be Unlisted or Public. Liked videos are
+   private, so there's no Liked Music in this mode. Sign-in mode (GOOGLE_CLIENT_*) also reads your
+   own playlists and liked music, but Google blocks it for accounts with Advanced Protection.
    YT Music playlists are YouTube playlists; "liked music" = your liked videos that are music
    (category 10). There's no album/ISRC field, but songs from "<Artist> - Topic" channels carry
    them in the description ("Provided to YouTube by … / Title · Artist / Album / Released on: …").
@@ -267,8 +275,9 @@ async function ytToken(env, d) {
 async function yt(env, d, ctx, path) {
   if (ctx.calls >= YT_BUDGET) throw new Budget();
   ctx.calls++;
-  const token = ctx.yt ??= await ytToken(env, d);
-  const r = await fetch(YT_API + path, { headers: { Authorization: 'Bearer ' + token } });
+  let r;
+  if (ctx.key) r = await fetch(YT_API + path + (path.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(ctx.key));
+  else { const token = ctx.yt ??= await ytToken(env, d); r = await fetch(YT_API + path, { headers: { Authorization: 'Bearer ' + token } }); }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     const reason = data.error?.errors?.[0]?.reason || '';
@@ -318,7 +327,11 @@ async function ytStep(env, d, ctx) {
   try {
     while (true) {
       if (job.phase === 'lists') {
-        const page = await yt(env, d, ctx, `playlists?part=snippet,contentDetails&mine=true&maxResults=50${job.token ? '&pageToken=' + job.token : ''}`);
+        let page;
+        if (ctx.key) {             // API-key mode: exactly the playlists you added (at most 50)
+          const ids = (await kvGet(d, 'yt.lists')) || [];
+          page = ids.length ? await yt(env, d, ctx, `playlists?part=snippet,contentDetails&maxResults=50&id=${ids.map(encodeURIComponent).join(',')}`) : { items: [] };
+        } else page = await yt(env, d, ctx, `playlists?part=snippet,contentDetails&mine=true&maxResults=50${job.token ? '&pageToken=' + job.token : ''}`);
         const rows = (page.items || []).map(p => ({ id: 'yt:' + p.id, ext: p.id, name: p.snippet?.title || 'Untitled',
           image: p.snippet?.thumbnails?.high?.url || p.snippet?.thumbnails?.medium?.url || null, total: p.contentDetails?.itemCount ?? 0,
           snap: (p.contentDetails?.itemCount ?? 0) + '@' + day, owner: p.snippet?.channelTitle || '' }));
@@ -338,7 +351,14 @@ async function ytStep(env, d, ctx) {
       }
       if (job.phase === 'playlist') {
         if (!job.pl) {
-          if (!job.queue.length) { const me = await kvGet(d, 'yt.me'); job = { ...job, phase: 'liked', likes: me?.likes || 'LL', token: '', offset: 0, fresh: 0 }; continue; }
+          if (!job.queue.length) {
+            if (ctx.key) {         // no likes without a sign-in: this cycle is done
+              const msg = 'YouTube Music synced';
+              await d.batch([kvSet(d, 'yt.job', { phase: 'done', at: Date.now() }), kvSet(d, 'yt.last', Date.now()), logStmt(d, msg)]);
+              return { done: true, msg };
+            }
+            const me = await kvGet(d, 'yt.me'); job = { ...job, phase: 'liked', likes: me?.likes || 'LL', token: '', offset: 0, fresh: 0 }; continue;
+          }
           job.pl = job.queue.shift();job.offset = 0;job.token = '';
         }
         const pl = await d.prepare('SELECT ext, snap FROM playlists WHERE id = ?').bind(job.pl).first();
@@ -414,6 +434,34 @@ async function ytStep(env, d, ctx) {
   }
 }
 
+function ytListId(v) {
+  const s = String(v || '').trim();
+  try { const u = new URL(s); const l = u.searchParams.get('list'); if (l) return l; } catch (e) {}
+  return /^[A-Za-z0-9_-]{10,64}$/.test(s) ? s : null;
+}
+async function ytPlaylists(env, body) {
+  if (!env.YT_API_KEY) throw new HttpError(500, 'Set YT_API_KEY in the Worker first (SETUP.md)');
+  const d = await db(env), ids = (await kvGet(d, 'yt.lists')) || [];
+  if (body?.remove) {
+    const id = String(body.remove).replace(/^yt:/, '');
+    await d.batch([kvSet(d, 'yt.lists', ids.filter(x => x !== id)), d.prepare('DELETE FROM items WHERE pl = ?').bind('yt:' + id),
+      d.prepare('DELETE FROM playlists WHERE id = ?').bind('yt:' + id), logStmt(d, 'YouTube playlist removed')]);
+    return { ok: true };
+  }
+  const id = ytListId(body?.add);
+  if (!id) throw new HttpError(400, "That doesn't look like a YouTube playlist link (it should contain list=…)");
+  if (/^(LL|LM|WL)$/.test(id)) throw new HttpError(400, "Liked music and Watch later are private: Mixtape can't read them without a Google sign-in");
+  if (ids.includes(id)) throw new HttpError(409, 'That playlist is already in Mixtape');
+  if (ids.length >= 50) throw new HttpError(400, 'Mixtape follows at most 50 YouTube playlists');
+  const r = await fetch(`${YT_API}playlists?part=snippet,contentDetails&id=${encodeURIComponent(id)}&key=${encodeURIComponent(env.YT_API_KEY)}`);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new HttpError(502, 'YouTube: ' + (data.error?.message || r.status));
+  const p = data.items?.[0];
+  if (!p) throw new HttpError(404, "Mixtape can't see that playlist. In YouTube Music, set it to Unlisted (or Public), then add it again.");
+  await d.batch([kvSet(d, 'yt.lists', [...ids, id]), kvDel(d, 'yt.job'), logStmt(d, `YouTube playlist added: ${p.snippet?.title || id}`)]);
+  return { ok: true, title: p.snippet?.title || id, count: p.contentDetails?.itemCount ?? 0 };
+}
+
 async function ytStart(env, body, url) {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) throw new HttpError(500, 'Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the Worker first (SETUP.md)');
   const ret = String(body?.return || '');let origin = '';
@@ -454,8 +502,9 @@ async function ytCallback(env, url) {
    One step per call. Services take turns: Spotify's cycle, then YouTube's (kv 'sync.cur'). */
 async function syncStep(env) {
   const d = await db(env);
-  const [sa, ya, cur0] = await Promise.all([kvGet(d, 'sp.auth'), kvGet(d, 'yt.auth'), kvGet(d, 'sync.cur')]);
-  const on = [sa && !sa.broken && 'sp', ya && !ya.broken && 'yt'].filter(Boolean);
+  const [sa, ya, cur0, ylists] = await Promise.all([kvGet(d, 'sp.auth'), kvGet(d, 'yt.auth'), kvGet(d, 'sync.cur'), kvGet(d, 'yt.lists')]);
+  const ytSignedIn = ya && !ya.broken, ytKey = !ytSignedIn && env.YT_API_KEY && ylists?.length ? env.YT_API_KEY : null;
+  const on = [sa && !sa.broken && 'sp', (ytSignedIn || ytKey) && 'yt'].filter(Boolean);
   if (!on.length) return { done: true, msg: sa?.broken || ya?.broken || 'Nothing connected yet' };
   // a simple lease so the cron and the app don't sync at the same time
   const now = Date.now();
@@ -463,7 +512,7 @@ async function syncStep(env) {
   if (!got.meta.changes) return { done: false, wait: 5, msg: 'Another sync is running' };
   try {
     const cur = on.includes(cur0) ? cur0 : on[0];
-    const r = cur === 'sp' ? await spStep(env, d, { calls: 0 }) : await ytStep(env, d, { calls: 0 });
+    const r = cur === 'sp' ? await spStep(env, d, { calls: 0 }) : await ytStep(env, d, { calls: 0, key: ytKey });
     if (!r.done) { if (cur !== cur0) await kvSet(d, 'sync.cur', cur).run(); return r; }
     const nextSvc = on[on.indexOf(cur) + 1];
     if (nextSvc) { await kvSet(d, 'sync.cur', nextSvc).run(); return { done: false, msg: r.msg + ' · YouTube Music next' }; }
@@ -478,16 +527,19 @@ async function syncStep(env) {
 /* ---------- endpoints ---------- */
 async function status(env) {
   const d = await db(env);
-  const [auth, me, job, last, ya, yme, yjob, ylast, counts, log] = await Promise.all([
+  const [auth, me, job, last, ya, yme, yjob, ylast, ylists, ypls, counts, log] = await Promise.all([
     kvGet(d, 'sp.auth'), kvGet(d, 'sp.me'), kvGet(d, 'sp.job'), kvGet(d, 'sp.last'),
-    kvGet(d, 'yt.auth'), kvGet(d, 'yt.me'), kvGet(d, 'yt.job'), kvGet(d, 'yt.last'),
+    kvGet(d, 'yt.auth'), kvGet(d, 'yt.me'), kvGet(d, 'yt.job'), kvGet(d, 'yt.last'), kvGet(d, 'yt.lists'),
+    d.prepare(`SELECT id, name, total FROM playlists WHERE src = 'youtube' AND kind = 'playlist' AND gone = 0`).all(),
     d.prepare(`SELECT (SELECT COUNT(*) FROM tracks) AS tracks, (SELECT COUNT(*) FROM playlists WHERE gone = 0) AS playlists`).first(),
     d.prepare('SELECT at, msg FROM log ORDER BY id DESC LIMIT 15').all(),
   ]);
   return {
     ok: true,
     spotify: auth ? { connected: true, name: me?.display_name || me?.id || '', broken: auth.broken || null, last, job: job?.phase || null } : { connected: false },
-    youtube: ya ? { connected: true, name: yme?.title || '', broken: ya.broken || null, last: ylast, job: yjob?.phase || null } : { connected: false },
+    youtube: ya ? { connected: true, mode: 'signin', name: yme?.title || '', broken: ya.broken || null, last: ylast, job: yjob?.phase || null }
+      : { connected: !!(env.YT_API_KEY && ylists?.length), mode: env.YT_API_KEY ? 'key' : null, last: ylast, job: yjob?.phase || null,
+          lists: (ylists || []).map(id => { const p = ypls.results.find(x => x.id === 'yt:' + id); return { id, name: p?.name || null, total: p?.total ?? null }; }) },
     counts, log: log.results,
   };
 }
@@ -569,12 +621,13 @@ export default {
       const url = new URL(request.url), p = url.pathname, m = request.method;
       const body = () => request.json().catch(() => null);
       if (m === 'GET' && p === '/status') return reply(await status(env));
-      if (m === 'GET' && p === '/config') return reply({ spotifyClientId: env.SPOTIFY_CLIENT_ID || null, youtube: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) });
+      if (m === 'GET' && p === '/config') return reply({ spotifyClientId: env.SPOTIFY_CLIENT_ID || null, youtube: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET), youtubeKey: !!env.YT_API_KEY });
       if (m === 'GET' && p === '/library') return await library(env, head);
       if (m === 'POST' && p === '/sync') return reply(await syncStep(env));
       if (m === 'POST' && p === '/spotify/connect') return reply(await spConnect(env, await body()));
       if (m === 'POST' && p === '/spotify/disconnect') return reply(await spDisconnect(env));
       if (m === 'POST' && p === '/youtube/start') return reply(await ytStart(env, await body(), url));
+      if (m === 'POST' && p === '/youtube/playlists') return reply(await ytPlaylists(env, await body()));
       if (m === 'POST' && p === '/youtube/disconnect') return reply(await ytDisconnect(env));
       if (m === 'GET' && p === '/spotify/token') { const d = await db(env); return reply({ token: await spToken(env, d) }); }
       throw new HttpError(404, 'Not found');

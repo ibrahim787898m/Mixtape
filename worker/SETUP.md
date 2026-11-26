@@ -57,37 +57,35 @@ Worker → **Settings** → **Triggers** → **Cron Triggers** → **Add** → `
    every 15 minutes, when you open the app, and with the sync button.
 4. On your phone: open the same address, paste the Worker address + key once.
 
-## 8. YouTube Music (Google sign-in)
-YouTube Music playlists are YouTube playlists, read through the official YouTube Data API.
-1. https://console.cloud.google.com → project picker at the top → **New project** → name `Mixtape` → **Create**,
-   and make sure it's selected.
-2. **APIs & Services** → **Library** → search **YouTube Data API v3** → **Enable**.
-3. **Google Auth Platform** (or "OAuth consent screen") → **Get started**:
-   - App name `Mixtape`, your email as support email → **Next**
-   - Audience: **External** → **Next** → contact email → agree → **Create**.
-4. Still in Google Auth Platform:
-   - **Data Access** → **Add or remove scopes** → tick `.../auth/youtube` ("Manage your YouTube account";
-     Mixtape reads now and will only ever *add* songs later) → **Update** → **Save**.
-   - **Audience** → **Publish app** → confirm. It says "In production". **Don't** submit for verification.
-     This matters: while an app is in "Testing", Google signs you out every 7 days.
-5. **Clients** → **Create client** → type **Web application** → name `Mixtape Worker` →
-   **Authorized redirect URIs** → **Add URI** → your Worker address + `/youtube/callback`, e.g.
-   `https://mixtape-api.<your-subdomain>.workers.dev/youtube/callback` → **Create**.
-   Copy the **Client ID** and **Client secret** (the secret is shown once; keep it in your password manager).
-6. Worker → **Settings** → **Variables and Secrets** → add:
+## 8. YouTube Music (API key, no Google sign-in)
+Mixtape reads YouTube Music playlists with a Google **API key**. There's no Google sign-in, so this
+works with Advanced Protection on. The playlists you add must be **Unlisted** or **Public**.
+1. https://console.cloud.google.com → project `Mixtape` (create it if needed) → **APIs & Services** →
+   **Library** → **YouTube Data API v3** → **Enable**.
+2. **APIs & Services** → **Credentials** → **Create credentials** → **API key**. Copy it.
+3. Click the new key → **API restrictions** → **Restrict key** → tick only **YouTube Data API v3** → **Save**.
+   Leave "Application restrictions" on **None** (the Worker calls Google from Cloudflare's servers).
+4. Worker → **Settings** → **Variables and Secrets** → add a **Secret** `YT_API_KEY` = the key → **Deploy**.
+5. Paste the newest `mixtape-api.js` into the Worker (**Edit code** → replace everything → **Deploy**).
+6. In YouTube Music, for each playlist you want: open it → **⋮** (or the pencil) → **Edit playlist** →
+   Privacy **Unlisted** → **Save**. Then **⋮** → **Share** → **Copy link**.
+7. Mixtape → **Settings** → YouTube Music → paste the link → **Add**. Repeat for each playlist (up to 50).
+   Public playlists by other people work too.
 
-   | Type | Name | Value |
-   |---|---|---|
-   | Text | `GOOGLE_CLIENT_ID` | the Client ID |
-   | Secret | `GOOGLE_CLIENT_SECRET` | the Client secret |
+What syncs: the playlists you added, every 15 minutes (about 1 of YouTube's 10,000 free daily quota
+units when nothing changed). **Liked music can't be read** this way, because YouTube keeps likes
+private. Tip: add songs to a playlist like "Mixtape Likes" instead of (or as well as) liking them.
 
-7. Paste the newest `mixtape-api.js` into the Worker (**Edit code** → replace everything → **Deploy**).
-8. Mixtape → **Settings** → **Connect YouTube Music** → pick the account (or channel) you use for YouTube Music.
-   Google shows **"Google hasn't verified this app"**: that's expected for your own personal app →
-   **Advanced** → **Go to Mixtape (unsafe)** → tick the YouTube permission → **Continue**. You land back in Mixtape.
-
-What syncs: your own YouTube Music playlists, and **Liked Music** = your liked videos that are music
-(other liked videos are left out). Uses about 2 of YouTube's 10,000 free daily quota units per sync when nothing changed.
+### Optional: Google sign-in instead (not possible with Advanced Protection)
+Sign-in mode also reads all your own playlists and liked music without links, and later lets Mixtape
+add songs on YouTube. Google blocks it for accounts with **Advanced Protection** ("Mixtape is blocked
+by Advanced Protection"), because the app isn't verified by Google. If you ever turn Advanced
+Protection off: in the same project → **Google Auth Platform** → Branding (app name, support email,
+home page `https://ibrahim787898m.github.io/Mixtape/`, privacy policy `…/Mixtape/privacy.html`,
+authorized domain `ibrahim787898m.github.io`) → Data Access (add `.../auth/youtube`) → Audience →
+**Publish app** (still "Testing" = signed out every 7 days) → Clients → **Web application** with
+redirect URI `https://mixtape-api.<your-subdomain>.workers.dev/youtube/callback` → put `GOOGLE_CLIENT_ID`
+(text) and `GOOGLE_CLIENT_SECRET` (secret) in the Worker. The sign-in button then appears in Settings.
 
 ## Test on your computer (optional)
 ```
@@ -104,11 +102,11 @@ Open **http://127.0.0.1:8000/** (not `localhost`, so it matches the Spotify redi
 | Spotify: INVALID_CLIENT / redirect URI mismatch | The address in the browser must match a Redirect URI in step 3 exactly |
 | Spotify sign-in expired | Spotify logins last 6 months: Settings → Spotify → **Sign in again** |
 | A playlist shows no songs | You only follow it: Spotify shares songs only of playlists you own or collaborate on |
-| Google: redirect_uri_mismatch | The Authorized redirect URI (step 8.5) must be exactly the Worker address + `/youtube/callback` |
-| Google: access_denied / "app is blocked" | Step 8.4: the app must be published ("In production") or your account added as a test user |
-| no refresh token | Google only sends one on the first sign-in: myaccount.google.com → Security → Third-party connections → Mixtape → remove access, then connect again |
-| This Google account has no YouTube channel | Choose the channel you use for YouTube Music on the account picker (brand channels are listed there) |
+| Mixtape can't see that playlist | Set it to Unlisted (or Public) in YouTube Music, then add it again |
+| YouTube 403 "API key not valid" / "has not been used" | Step 8.1 (enable the API) and 8.3 (the key must allow YouTube Data API v3) |
+| A YouTube playlist disappeared from Mixtape | It was set back to Private (or deleted): make it Unlisted and add it again |
 | YouTube daily quota used up | Syncing continues after midnight Pacific time |
+| Sign-in mode: "blocked by Advanced Protection" | Expected: use the API key (section 8) |
 
 ## Updating the Worker code
 When `mixtape-api.js` changes: Worker → **Edit code** → replace everything → **Deploy**. Settings,

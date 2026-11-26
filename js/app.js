@@ -281,6 +281,21 @@ function spotifyCard() {
 }
 function youtubeCard() {
   const s = ST?.youtube, on = s?.connected;
+  if (s?.mode !== 'signin') {            // API-key mode: follow playlists by link (no Google sign-in)
+    const lists = s?.lists || [];
+    return `<div class="card"><h3><span class="src youtube" style="margin:0;width:10px;height:10px"></span>YouTube Music
+        <span class="status ${on ? 'on' : 'off'}">${on ? `● ${lists.length} playlist${lists.length === 1 ? '' : 's'}` : '○ no playlists yet'}</span></h3>
+      ${s?.mode !== 'key' ? `<p>Add <span class="mono">YT_API_KEY</span> to the Worker first (SETUP.md, section 8).</p>` : `
+      <p>Paste the link of a YouTube Music playlist. Your own playlists must be <b>Unlisted</b> or Public (YouTube Music → playlist → ⋮ → Edit → Privacy). Public playlists by other people work too.</p>
+      <div class="field" style="flex-direction:row;gap:8px"><input id="ytLink" placeholder="https://music.youtube.com/playlist?list=…" style="flex:1" autocomplete="off"><button class="btn" style="background:var(--yt);border-color:var(--yt);color:#fff" data-act="ytAdd">Add</button></div>
+      <div class="err" id="ytErr"></div>
+      ${lists.length ? `<div class="list" style="display:flex;flex-direction:column;gap:4px;margin-top:4px">${lists.map(l => `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px solid var(--line)">
+          <span class="grow" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.name || 'Waiting for the next sync…')}</span>
+          <span class="faint mono" style="font-size:12px">${l.total != null ? plural(l.total, 'song') : ''}</span>
+          <button class="chip" style="height:28px;padding:0 9px" data-act="ytRemove" data-id="${esc(l.id)}" title="Stop following">${I('x')}</button></div>`).join('')}</div>
+        <div class="btns"><button class="btn" data-act="sync" ${sync.busy ? 'disabled' : ''}>${I('sync')} Sync now</button></div>` : ''}
+      <p class="faint" style="font-size:12.5px;margin-top:12px">Liked music is private on YouTube, so it can't be read without a Google sign-in (which Advanced Protection blocks). Tip: add songs to a playlist like "Mixtape Likes" instead.${on ? ` Last sync ${esc(ago(s.last))}.` : ''}</p>`}</div>`;
+  }
   return `<div class="card"><h3><span class="src youtube" style="margin:0;width:10px;height:10px"></span>YouTube Music
       <span class="status ${s?.broken ? 'bad' : on ? 'on' : 'off'}">${s?.broken ? '● sign in again' : on ? '● connected' : '○ not connected'}</span></h3>
     ${s?.broken ? `<p style="color:var(--err)">${esc(s.broken)}</p>` : on ? `<p>Signed in as <b>${esc(s.name)}</b>. Last sync ${esc(ago(s.last))}. Your playlists and liked music sync every 15 minutes.</p>`
@@ -366,6 +381,17 @@ const A = {
     try { const c = await api('/config'); if (!c.spotifyClientId) throw new Error('Set SPOTIFY_CLIENT_ID in the Worker first (SETUP.md step 3)'); await spotifyLogin(c.spotifyClientId); }
     catch (e) { toast(e.message); }
   },
+  async ytAdd() {
+    const v = $('#ytLink').value.trim(), err = $('#ytErr');err.textContent = '';
+    if (!v) return;
+    try { const r = await api('/youtube/playlists', { add: v }); toast(`Added "${r.title}"`); await refreshStatus(); render(); runSync(); }
+    catch (e) { err.textContent = e.message; }
+  },
+  async ytRemove(d) {
+    const l = ST?.youtube?.lists?.find(x => x.id === d.id);
+    if (!confirm(`Stop following "${l?.name || 'this playlist'}"? It leaves Mixtape; nothing changes on YouTube.`)) return;
+    try { await api('/youtube/playlists', { remove: d.id }); await refreshStatus(); await fetchLibrary(); render(); toast('Playlist removed'); } catch (e) { toast(e.message); }
+  },
   async ytLogin() {
     try { const r = await api('/youtube/start', { return: location.origin + location.pathname }); location.href = r.url; }
     catch (e) { toast(e.message); }
@@ -394,6 +420,7 @@ document.addEventListener('change', e => {
   if (el.dataset.act === 'plsort') { prefs.plSort = el.value; savePrefs(); render(); }
 });
 document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.activeElement.id === 'ytLink') { e.preventDefault(); A.ytAdd(); return; }
   if (e.key === '/' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { const q = $('#q'); if (q) { e.preventDefault(); q.focus(); } }
   if (e.key === 'Escape' && document.activeElement.id === 'q') { F.q = ''; render(); }
   if (e.key === ' ' && Player.P.ctx && !/INPUT|SELECT|TEXTAREA|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); Player.toggle().catch(playErr); }

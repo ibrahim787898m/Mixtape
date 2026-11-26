@@ -8,7 +8,7 @@ I listen on both apps, and keeping them in sync by hand (or with a separate sync
 - **One library**: every song from your playlists and liked songs, with cover art, artist, album, year and length
 - **Your playlists**: each with its own page, in playlist order or sorted by any column
 - **Search and filters**: instant search across title, artist and album; filter by service, date added, decade and playlist; sort by title, album, date added or length
-- **Both services**: Spotify playlists and liked songs, YouTube Music playlists and liked music, side by side with a badge on every song
+- **Both services**: Spotify playlists and liked songs, YouTube Music playlists (yours or anyone's public ones), side by side with a badge on every song
 - **Auto-sync**: a private Cloudflare Worker checks Spotify and YouTube Music every 15 minutes, and again when you open the app. Only playlists that changed are re-read.
 - **Play inside the app**: click any song and the list you're looking at becomes the queue. On a computer Mixtape is a Spotify player itself (Web Playback SDK, Premium). On a phone it remote-controls the Spotify app (Spotify Connect). Player bar with seek, volume, media keys and the space bar.
 - **Fast with big libraries**: only the rows on screen are drawn, so 10,000 songs scroll smoothly
@@ -17,7 +17,7 @@ I listen on both apps, and keeping them in sync by hand (or with a separate sync
 ## Roadmap
 1. ✅ Spotify sign-in, playlists and liked songs, library view
    ✅ Playback (Spotify in the browser, or your Spotify app on a phone)
-2. ✅ YouTube Music sign-in and import (your playlists + Liked Music)
+2. ✅ YouTube Music import (playlists added by link, read with an API key: no Google sign-in needed)
 3. Matching the same song across both services
 4. Smart playlists (saved filters, like "missing on YouTube Music")
 5. Add missing songs to the other service in one click
