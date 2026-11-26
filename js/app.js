@@ -58,6 +58,11 @@ async function fetchLibrary() {
   try { localStorage.setItem(LIBK, text); } catch (e) { localStorage.removeItem(LIBK); }   // too big to cache: fine, just slower to open
 }
 
+/* connected services (from /status) */
+const svcs = () => ['spotify', 'youtube'].map(k => ST?.[k]).filter(x => x?.connected);
+const anyOn = () => svcs().some(x => !x.broken);
+const lastSync = () => Math.min(...svcs().filter(x => !x.broken).map(x => x.last || 0));
+
 /* ---------- formatting ---------- */
 const dur = ms => { const s = Math.round((ms || 0) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 function ago(t) {
@@ -82,19 +87,20 @@ let plQuery = '';
 function renderSide() {
   const r = route(), all = (L?.playlists || []).filter(p => !p.gone && p.kind !== 'liked');
   const lists = all.filter(p => p.readable), followed = all.filter(p => !p.readable);
-  const liked = L?.byId.get('sp:liked');
+  const liked = L?.byId.get('sp:liked'), ytLiked = L?.byId.get('yt:liked');
   const match = p => !plQuery || p.name.toLowerCase().includes(plQuery);
   const shown = lists.filter(match), shownF = followed.filter(match);
   const link = p => `<a href="#/pl/${encodeURIComponent(p.id)}" class="${r.id === p.id ? 'on' : ''}" title="${esc(p.name)}">
         <span class="thumb" style="${p.image ? `background-image:url('${esc(p.image)}')` : ''}">${p.image ? '' : I('note')}</span>
         <span class="nm">${esc(p.name)}</span><span class="src ${p.src}"></span></a>`;
-  const dot = sync.busy ? 'busy' : ST?.spotify?.broken ? 'err' : ST?.spotify?.connected ? 'ok' : '';
+  const dot = sync.busy ? 'busy' : svcs().some(x => x.broken) ? 'err' : anyOn() ? 'ok' : '';
   $('#syncDotM').className = 'syncdot ' + dot;
   $('#side').innerHTML = `
     <div class="brand"><span class="logo"></span>Mixtape</div>
     <nav class="nav">
       <a href="#/library" class="${r.v === 'library' ? 'on' : ''}">${I('lib')} Library <span class="n">${L ? L.all.length.toLocaleString() : ''}</span></a>
-      ${liked ? `<a href="#/pl/sp:liked" class="${r.id === 'sp:liked' ? 'on' : ''}">${I('heart')} Liked Songs <span class="n">${(L.items['sp:liked'] || []).length.toLocaleString()}</span></a>` : ''}
+      ${liked ? `<a href="#/pl/sp:liked" class="${r.id === 'sp:liked' ? 'on' : ''}">${I('heart')} Liked Songs <span class="src spotify" style="margin:0 0 0 2px"></span><span class="n">${(L.items['sp:liked'] || []).length.toLocaleString()}</span></a>` : ''}
+      ${ytLiked ? `<a href="#/pl/yt:liked" class="${r.id === 'yt:liked' ? 'on' : ''}">${I('heart')} Liked Music <span class="src youtube" style="margin:0 0 0 2px"></span><span class="n">${(L.items['yt:liked'] || []).length.toLocaleString()}</span></a>` : ''}
       <a href="#/settings" class="${r.v === 'settings' ? 'on' : ''}">${I('gear')} Settings</a>
     </nav>
     <div class="sechead">Playlists <span class="grow"></span><span class="mono">${lists.length || ''}</span></div>
@@ -104,7 +110,7 @@ function renderSide() {
       ${followed.length ? `<div class="sechead" style="margin-top:16px" title="Made by other people or by Spotify. Spotify doesn't share their songs with apps.">Followed on Spotify <span class="grow"></span><span class="mono">${followed.length}</span></div>
         <div class="followed">${shownF.map(link).join('') || '<div class="faint" style="padding:6px 10px;font-size:13px">No playlists match.</div>'}</div>` : ''}</div>
     <div class="sidefoot"><span class="syncdot ${dot}"></span><span class="grow muted" id="syncTxt">${esc(syncLine())}</span>
-      ${apiCfg() && ST?.spotify?.connected ? `<button class="iconbtn" style="width:32px;height:32px;border-radius:9px;border:1px solid var(--line);background:var(--panel);display:grid;place-items:center;cursor:pointer" data-act="sync" title="Sync now" ${sync.busy ? 'disabled' : ''}>${I('sync')}</button>` : ''}</div>`;
+      ${apiCfg() && anyOn() ? `<button class="iconbtn" style="width:32px;height:32px;border-radius:9px;border:1px solid var(--line);background:var(--panel);display:grid;place-items:center;cursor:pointer" data-act="sync" title="Sync now" ${sync.busy ? 'disabled' : ''}>${I('sync')}</button>` : ''}</div>`;
   const q = $('#plq');
   if (q) q.oninput = () => { plQuery = q.value.toLowerCase(); const pos = q.selectionStart; renderSide(); const n = $('#plq'); n.focus(); n.setSelectionRange(pos, pos); };
 }
@@ -112,8 +118,9 @@ function syncLine() {
   if (sync.busy) return sync.msg || 'Syncing…';
   if (!apiCfg()) return 'Not set up';
   if (ST?.spotify?.broken) return 'Spotify needs a new sign-in';
-  if (!ST?.spotify?.connected) return 'No service connected';
-  return 'Synced ' + ago(ST.spotify.last);
+  if (ST?.youtube?.broken) return 'YouTube needs a new sign-in';
+  if (!anyOn()) return 'No service connected';
+  return 'Synced ' + ago(lastSync());
 }
 
 /* ---------- song lists ---------- */
@@ -272,11 +279,21 @@ function spotifyCard() {
     ${sync.busy ? `<div class="faint mono" style="font-size:12.5px;margin-top:12px">${esc(sync.msg)}</div><div class="progress"><i></i></div>` : ''}
     <p class="faint" style="font-size:12.5px;margin-top:12px">Redirect URI for the Spotify app: <span class="mono">${esc(redirectUri())}</span></p></div>`;
 }
+function youtubeCard() {
+  const s = ST?.youtube, on = s?.connected;
+  return `<div class="card"><h3><span class="src youtube" style="margin:0;width:10px;height:10px"></span>YouTube Music
+      <span class="status ${s?.broken ? 'bad' : on ? 'on' : 'off'}">${s?.broken ? '● sign in again' : on ? '● connected' : '○ not connected'}</span></h3>
+    ${s?.broken ? `<p style="color:var(--err)">${esc(s.broken)}</p>` : on ? `<p>Signed in as <b>${esc(s.name)}</b>. Last sync ${esc(ago(s.last))}. Your playlists and liked music sync every 15 minutes.</p>`
+      : '<p>Sign in with the Google account you use for YouTube Music. The Worker keeps the login.</p>'}
+    <div class="btns"><button class="btn" style="background:var(--yt);border-color:var(--yt);color:#fff" data-act="ytLogin" ${apiCfg() ? '' : 'disabled'}>${on ? 'Sign in again' : 'Connect YouTube Music'}</button>
+      ${on ? `<button class="btn" data-act="sync" ${sync.busy ? 'disabled' : ''}>${I('sync')} Sync now</button><button class="btn danger" data-act="ytOff">Disconnect</button>` : ''}</div>
+    <p class="faint" style="font-size:12.5px;margin-top:12px">"Liked Music" is your liked videos that are music; other liked videos are left out.</p></div>`;
+}
 function viewSettings() {
   const log = ST?.log || [];
   return `<div class="wrap"><h2>Settings</h2><p class="muted">Services, sync and this device.</p><div class="grid">
     ${workerCard(false)}${spotifyCard()}
-    <div class="card"><h3><span class="src youtube" style="margin:0;width:10px;height:10px"></span>YouTube Music <span class="status off">coming next</span></h3><p>Step 2: sign in with Google and your YouTube Music playlists join the library, matched with Spotify.</p></div>
+    ${youtubeCard()}
     <div class="card"><h3>Appearance</h3><div class="chips">${['dark', 'light', 'auto'].map(t => `<button class="chip ${prefs.theme === t ? 'on' : ''}" data-act="theme" data-v="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}</div></div>
     <div class="card"><h3>Recent activity</h3>${log.length ? `<div class="log">${log.map(l => `<div><span>${esc(new Date(l.at).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(l.msg)}</div>`).join('')}</div>` : '<p>Nothing yet.</p>'}</div>
   </div></div>`;
@@ -284,8 +301,8 @@ function viewSettings() {
 function viewWelcome() {
   return `<div class="wrap"><div class="onb"><div class="brand"><span class="logo"></span>Mixtape</div>
     <p class="muted" style="font-size:16px;margin-bottom:20px">All your songs from Spotify and YouTube Music, in one place.</p>
-    ${!apiCfg() ? workerCard(true) : spotifyCard()}
-    <ol class="steps" style="margin-top:18px"><li${apiCfg() ? ' style="text-decoration:line-through"' : ''}>Connect your Worker</li><li>Connect Spotify</li><li>Your library fills in (first sync takes a minute)</li></ol></div></div>`;
+    ${!apiCfg() ? workerCard(true) : spotifyCard() + '<div style="height:14px"></div>' + youtubeCard()}
+    <ol class="steps" style="margin-top:18px"><li${apiCfg() ? ' style="text-decoration:line-through"' : ''}>Connect your Worker</li><li>Connect Spotify and/or YouTube Music</li><li>Your library fills in (first sync takes a minute)</li></ol></div></div>`;
 }
 
 /* ---------- render ---------- */
@@ -295,7 +312,7 @@ function render() {
   const r = route(), main = $('#main');
   const keepScroll = main.dataset.route === location.hash ? $('#list')?.scrollTop : 0;
   if (r.v === 'settings') main.innerHTML = viewSettings();
-  else if (!apiCfg() || !L || (!L.all.length && !ST?.spotify?.connected)) main.innerHTML = viewWelcome();
+  else if (!apiCfg() || !L || (!L.all.length && !anyOn())) main.innerHTML = viewWelcome();
   else main.innerHTML = viewSongs(r);
   main.dataset.route = location.hash;
   const list = $('#list');
@@ -341,13 +358,21 @@ const A = {
     const err = $('#wErr');err.textContent = '';
     if (!/^https:\/\/[^\s/]+$/.test(url) && !/^http:\/\/127\.0\.0\.1:\d+$/.test(url)) { err.textContent = 'Paste the Worker address, like https://mixtape-api.you.workers.dev'; return; }
     if (key.length < 24) { err.textContent = 'The app key looks too short'; return; }
-    try { ST = await api('/status', undefined, { url, key }); setApiCfg({ url, key }); toast('Worker connected'); await fetchLibrary(); render(); if (ST.spotify?.connected) runSync(); }
+    try { ST = await api('/status', undefined, { url, key }); setApiCfg({ url, key }); toast('Worker connected'); await fetchLibrary(); render(); if (anyOn()) runSync(); }
     catch (e) { err.textContent = e.message; }
   },
   wOff: () => { if (!confirm('Forget the Worker on this device? Nothing in the Worker or your music apps changes.')) return; setApiCfg(null); localStorage.removeItem(LIBK); L = null; ST = null; render(); },
   async spLogin() {
     try { const c = await api('/config'); if (!c.spotifyClientId) throw new Error('Set SPOTIFY_CLIENT_ID in the Worker first (SETUP.md step 3)'); await spotifyLogin(c.spotifyClientId); }
     catch (e) { toast(e.message); }
+  },
+  async ytLogin() {
+    try { const r = await api('/youtube/start', { return: location.origin + location.pathname }); location.href = r.url; }
+    catch (e) { toast(e.message); }
+  },
+  async ytOff() {
+    if (!confirm('Disconnect YouTube Music? Your Mixtape library stays; it just stops updating from YouTube.')) return;
+    try { await api('/youtube/disconnect', {}); await refreshStatus(); render(); toast('YouTube Music disconnected'); } catch (e) { toast(e.message); }
   },
   async spOff() {
     if (!confirm('Disconnect Spotify? Your Mixtape library stays; it just stops updating from Spotify.')) return;
@@ -356,7 +381,11 @@ const A = {
 };
 document.addEventListener('click', e => {
   const row = e.target.closest('.row');
-  if (row && !e.target.closest('a')) { Player.playList(rows.map(x => x.t), +row.dataset.i).catch(playErr); return; }   // click a song: play from here
+  if (row && !e.target.closest('a')) {   // click a song: play from here
+    const t = rows[+row.dataset.i]?.t;
+    if (t?.src === 'youtube') { window.open(t.url, '_blank', 'noopener'); return; }   // YouTube songs play inside Mixtape in a later step
+    Player.playList(rows.map(x => x.t), +row.dataset.i).catch(playErr); return;
+  }
   const el = e.target.closest('[data-act]'); if (!el || el.tagName === 'SELECT') return; const f = A[el.dataset.act]; if (f) { e.preventDefault(); f(el.dataset, e); }
 });
 document.addEventListener('change', e => {
@@ -370,13 +399,18 @@ document.addEventListener('keydown', e => {
   if (e.key === ' ' && Player.P.ctx && !/INPUT|SELECT|TEXTAREA|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); Player.toggle().catch(playErr); }
 });
 document.addEventListener('visibilitychange', () => {   // back to the app after a while: catch up
-  if (!document.hidden && apiCfg() && ST?.spotify?.connected && Date.now() - (ST.spotify.last || 0) > 10 * 6e4) runSync();
+  if (!document.hidden && apiCfg() && anyOn() && Date.now() - lastSync() > 10 * 6e4) runSync();
 });
 
 /* ---------- start ---------- */
 (async function start() {
   loadCache();render();
-  let ret = null;
+  let ret = null, ytRet = null;
+  const q = new URLSearchParams(location.search);
+  if (q.has('yt')) {           // back from Google sign-in (via the Worker)
+    ytRet = q.get('yt');if (ytRet !== 'ok') toast(q.get('m') || 'YouTube sign-in failed');else toast('YouTube Music connected');
+    history.replaceState(null, '', location.pathname + location.hash);
+  }
   try { ret = await spotifyReturn(); } catch (e) { toast(e.message); }
   if (!apiCfg()) return;
   if (ret) {
@@ -387,5 +421,5 @@ document.addEventListener('visibilitychange', () => {   // back to the app after
   if (!L) { try { await fetchLibrary(); } catch (e) { toast(e.message); } }
   render();
   if (ST?.spotify?.connected && !ST.spotify.broken) Player.preloadSdk();   // ready for the first click
-  if (ST?.spotify?.connected && !ST.spotify.broken && (ret || Date.now() - (ST.spotify.last || 0) > 5 * 6e4)) runSync();
+  if (anyOn() && (ret || ytRet === 'ok' || Date.now() - lastSync() > 5 * 6e4)) runSync();
 })();
