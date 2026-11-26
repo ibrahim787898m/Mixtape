@@ -20,6 +20,7 @@ const ICONS = {
   play: '<path d="M8 5.5v13l11-6.5z" fill="currentColor" stroke="none"/>', pause: '<path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor" stroke="none"/>',
   next: '<path d="M6 6l9 6-9 6z" fill="currentColor" stroke="none"/><path d="M18 6v12"/>', prev: '<path d="M18 6l-9 6 9 6z" fill="currentColor" stroke="none"/><path d="M6 6v12"/>',
   vol: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>', device: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+  grow: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>', shrink: '<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>',
   phone: '<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/>',
   up: '<path d="m6 15 6-6 6 6"/>', down: '<path d="m6 9 6 6 6-6"/>', x: '<path d="M6 6l12 12M18 6 6 18"/>',
 };
@@ -237,8 +238,9 @@ function renderPlayer() {
         <input type="range" id="pSeek" min="0" max="${s?.dur || 0}" value="${Player.now()}" step="1000" aria-label="Seek">
         <span class="mono">${mmss(s?.dur || 0)}</span></div>
     </div>
-    <div class="pright"><span class="pdev" title="Playing on">${I(P.mode === 'connect' ? 'phone' : 'device')}<span>${esc(P.device || '')}</span></span>
-      ${P.mode === 'browser' ? `<span class="pvol">${I('vol')}<input type="range" id="pVol" min="0" max="1" step="0.05" value="${P.vol}" aria-label="Volume"></span>` : ''}</div>`;
+    <div class="pright">${P.src === 'youtube' ? `<button class="pb" data-act="ytSize" title="Bigger / smaller video">${I(P.ytBig ? 'shrink' : 'grow')}</button>` : ''}
+      <span class="pdev" title="Playing on">${P.src === 'youtube' ? '<span class="pill youtube" style="width:auto;padding:0 6px">YT</span>' : I(P.mode === 'connect' ? 'phone' : 'device')}<span>${esc(P.src === 'youtube' ? 'YouTube' : P.device || '')}</span></span>
+      ${P.mode === 'browser' || P.src === 'youtube' ? `<span class="pvol">${I('vol')}<input type="range" id="pVol" min="0" max="1" step="0.05" value="${P.vol}" aria-label="Volume"></span>` : ''}</div>`;
   const seekEl = $('#pSeek');
   seekEl.oninput = () => { seekEl._drag = true; $('#pPos').textContent = mmss(+seekEl.value); };
   seekEl.onchange = () => { seekEl._drag = false; Player.seek(+seekEl.value).catch(e => toast(e.message)); };
@@ -368,6 +370,7 @@ const A = {
   pToggle: () => Player.toggle().catch(playErr),
   pNext: () => Player.next().catch(playErr),
   pPrev: () => Player.prev().catch(playErr),
+  ytSize: () => { Player.toggleYtSize(); renderPlayer(); },
   async wSave() {
     const url = $('#wUrl').value.trim().replace(/\/+$/, ''), key = $('#wKey').value.trim() || apiCfg()?.key || '';
     const err = $('#wErr');err.textContent = '';
@@ -408,8 +411,6 @@ const A = {
 document.addEventListener('click', e => {
   const row = e.target.closest('.row');
   if (row && !e.target.closest('a')) {   // click a song: play from here
-    const t = rows[+row.dataset.i]?.t;
-    if (t?.src === 'youtube') { window.open(t.url, '_blank', 'noopener'); return; }   // YouTube songs play inside Mixtape in a later step
     Player.playList(rows.map(x => x.t), +row.dataset.i).catch(playErr); return;
   }
   const el = e.target.closest('[data-act]'); if (!el || el.tagName === 'SELECT') return; const f = A[el.dataset.act]; if (f) { e.preventDefault(); f(el.dataset, e); }
@@ -448,5 +449,6 @@ document.addEventListener('visibilitychange', () => {   // back to the app after
   if (!L) { try { await fetchLibrary(); } catch (e) { toast(e.message); } }
   render();
   if (ST?.spotify?.connected && !ST.spotify.broken) Player.preloadSdk();   // ready for the first click
+  if (ST?.youtube?.connected) Player.preloadYt();
   if (anyOn() && (ret || ytRet === 'ok' || Date.now() - lastSync() > 5 * 6e4)) runSync();
 })();
