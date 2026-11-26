@@ -6,7 +6,7 @@ This is an **AI-built app** for the owner's daily use, not a learning repo. Clau
 One library for the owner's Spotify and YouTube Music songs. New songs added to playlists in either app are pulled in automatically, organised and filterable. The long-term goal is matching songs across both services and adding the missing ones to the other service.
 
 ## Layout
-- `index.html`, `css/app.css`, `js/app.js` (UI, routing, filters, virtual list), `js/api.js` (Worker client), `js/spotify.js` (PKCE sign-in). Static, no build step. Hosted on GitHub Pages.
+- `index.html`, `css/app.css`, `js/app.js` (UI, routing, filters, virtual list), `js/api.js` (Worker client), `js/spotify.js` (PKCE sign-in), `js/player.js` (playback: Web Playback SDK in desktop browsers, Spotify Connect remote control elsewhere; queue = the list you clicked in, sent in batches of 50 with the next batch loaded by Mixtape). Static, no build step. Hosted on GitHub Pages.
 - `worker/mixtape-api.js`: the Cloudflare Worker (pasted into the dashboard, so it must stay **one file**). Setup and every manual step: `worker/SETUP.md`.
 - `README.md` is the public description: update it when features change.
 

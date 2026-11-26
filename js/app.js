@@ -4,6 +4,7 @@
    A copy of the last library is cached in localStorage so the app opens instantly. */
 import { api, apiCfg, setApiCfg } from './api.js';
 import { spotifyLogin, spotifyReturn, redirectUri } from './spotify.js';
+import * as Player from './player.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -16,6 +17,10 @@ const ICONS = {
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', ext: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   sync: '<path d="M20 11a8 8 0 0 0-14.6-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5L20 16M20 20v-4h-4"/>', note: '<path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>',
+  play: '<path d="M8 5.5v13l11-6.5z" fill="currentColor" stroke="none"/>', pause: '<path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor" stroke="none"/>',
+  next: '<path d="M6 6l9 6-9 6z" fill="currentColor" stroke="none"/><path d="M18 6v12"/>', prev: '<path d="M18 6l-9 6 9 6z" fill="currentColor" stroke="none"/><path d="M6 6v12"/>',
+  vol: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>', device: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+  phone: '<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/>',
   up: '<path d="m6 15 6-6 6 6"/>', down: '<path d="m6 9 6 6 6-6"/>', x: '<path d="M6 6l12 12M18 6 6 18"/>',
 };
 const I = n => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ''}</svg>`;
@@ -195,8 +200,8 @@ function paintRows(force) {
   painted = first + ':' + last;
   let html = '';
   for (let i = first; i < last; i++) {
-    const x = rows[i], t = x.t;
-    html += `<div class="row" style="top:${i * h}px"><span class="idx">${i + 1}</span>
+    const x = rows[i], t = x.t, on = t.id === Player.currentId();
+    html += `<div class="row ${on ? 'now' : ''}" data-i="${i}" style="top:${i * h}px" title="Play"><span class="idx">${on && !Player.P.state?.paused ? '<span class="eq"><i></i><i></i><i></i></span>' : `<span class="n">${i + 1}</span>`}${I('play')}</span>
       <div class="t"><span class="art" style="${t.image ? `background-image:url('${esc(t.image)}')` : ''}"></span><div class="tt"><div class="ti">${esc(t.title)}</div><div class="ar">${esc(t.artists)}</div></div></div>
       <span class="al">${esc(t.album)}</span><span class="add">${esc(addedTxt(x.added))}</span>
       <span class="srcs"><span class="pill ${t.src}" title="${t.src === 'spotify' ? 'On Spotify' : 'On YouTube Music'}">${t.src === 'spotify' ? 'S' : 'YT'}</span></span>
@@ -205,6 +210,46 @@ function paintRows(force) {
   }
   box.innerHTML = html;
 }
+
+/* ---------- player bar ---------- */
+const mmss = ms => dur(ms);
+function renderPlayer() {
+  const el = $('#player'), P = Player.P, s = P.state;
+  if (!el) return;
+  if (!P.ctx && !s) { el.hidden = true; document.body.classList.remove('playing'); return; }
+  el.hidden = false;document.body.classList.add('playing');
+  const t = s?.id && L?.tracks.get(s.id);
+  el.innerHTML = `
+    <div class="pnow">${s ? `<span class="art" style="background-image:url('${esc(t?.image || s.image)}')"></span>
+      <div class="tt"><div class="ti">${esc(s.title)}</div><div class="ar">${esc(s.artists)}</div></div>` : `<div class="tt"><div class="ar">${P.busy ? 'Starting…' : ''}</div></div>`}</div>
+    <div class="pmid">
+      <div class="pbtns"><button class="pb" data-act="pPrev" aria-label="Previous">${I('prev')}</button>
+        <button class="pb big" data-act="pToggle" aria-label="${s?.paused === false ? 'Pause' : 'Play'}">${I(s && !s.paused ? 'pause' : 'play')}</button>
+        <button class="pb" data-act="pNext" aria-label="Next">${I('next')}</button></div>
+      <div class="pbar"><span class="mono" id="pPos">${mmss(Player.now())}</span>
+        <input type="range" id="pSeek" min="0" max="${s?.dur || 0}" value="${Player.now()}" step="1000" aria-label="Seek">
+        <span class="mono">${mmss(s?.dur || 0)}</span></div>
+    </div>
+    <div class="pright"><span class="pdev" title="Playing on">${I(P.mode === 'connect' ? 'phone' : 'device')}<span>${esc(P.device || '')}</span></span>
+      ${P.mode === 'browser' ? `<span class="pvol">${I('vol')}<input type="range" id="pVol" min="0" max="1" step="0.05" value="${P.vol}" aria-label="Volume"></span>` : ''}</div>`;
+  const seekEl = $('#pSeek');
+  seekEl.oninput = () => { seekEl._drag = true; $('#pPos').textContent = mmss(+seekEl.value); };
+  seekEl.onchange = () => { seekEl._drag = false; Player.seek(+seekEl.value).catch(e => toast(e.message)); };
+  const v = $('#pVol');if (v) v.oninput = () => Player.setVolume(+v.value);
+  if (P.error) { toast(P.error); P.error = ''; }
+}
+setInterval(() => {           // move the seek bar between updates
+  const s = Player.P.state, el = $('#pSeek');
+  if (!s || !el || el._drag) return;
+  el.value = Player.now();$('#pPos').textContent = mmss(Player.now());
+}, 500);
+let lastPlaying = null;
+Player.onPlayerChange(() => {
+  renderPlayer();
+  const key = Player.currentId() + ':' + Player.P.state?.paused;
+  if (key !== lastPlaying) { lastPlaying = key; paintRows(true); }
+});
+const playErr = e => toast(e.message);
 
 /* ---------- settings / onboarding ---------- */
 function workerCard(first) {
@@ -288,6 +333,9 @@ const A = {
   sort: d => { if (d.k === prefs.sort) prefs.dir = -prefs.dir; else { prefs.sort = d.k; prefs.dir = d.k === 'added' ? -1 : 1; } prefs.plSort = 'custom'; savePrefs(); render(); },
   theme: d => { prefs.theme = d.v; savePrefs(); render(); },
   sync: () => runSync(true),
+  pToggle: () => Player.toggle().catch(playErr),
+  pNext: () => Player.next().catch(playErr),
+  pPrev: () => Player.prev().catch(playErr),
   async wSave() {
     const url = $('#wUrl').value.trim().replace(/\/+$/, ''), key = $('#wKey').value.trim() || apiCfg()?.key || '';
     const err = $('#wErr');err.textContent = '';
@@ -306,7 +354,11 @@ const A = {
     try { await api('/spotify/disconnect', {}); await refreshStatus(); render(); toast('Spotify disconnected'); } catch (e) { toast(e.message); }
   },
 };
-document.addEventListener('click', e => { const el = e.target.closest('[data-act]'); if (!el || el.tagName === 'SELECT') return; const f = A[el.dataset.act]; if (f) { e.preventDefault(); f(el.dataset, e); } });
+document.addEventListener('click', e => {
+  const row = e.target.closest('.row');
+  if (row && !e.target.closest('a')) { Player.playList(rows.map(x => x.t), +row.dataset.i).catch(playErr); return; }   // click a song: play from here
+  const el = e.target.closest('[data-act]'); if (!el || el.tagName === 'SELECT') return; const f = A[el.dataset.act]; if (f) { e.preventDefault(); f(el.dataset, e); }
+});
 document.addEventListener('change', e => {
   const el = e.target;if (el.tagName !== 'SELECT') return;
   if (el.dataset.act === 'fsel') { F[el.dataset.k] = el.value; render(); }
@@ -315,6 +367,7 @@ document.addEventListener('change', e => {
 document.addEventListener('keydown', e => {
   if (e.key === '/' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { const q = $('#q'); if (q) { e.preventDefault(); q.focus(); } }
   if (e.key === 'Escape' && document.activeElement.id === 'q') { F.q = ''; render(); }
+  if (e.key === ' ' && Player.P.ctx && !/INPUT|SELECT|TEXTAREA|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); Player.toggle().catch(playErr); }
 });
 document.addEventListener('visibilitychange', () => {   // back to the app after a while: catch up
   if (!document.hidden && apiCfg() && ST?.spotify?.connected && Date.now() - (ST.spotify.last || 0) > 10 * 6e4) runSync();
@@ -333,5 +386,6 @@ document.addEventListener('visibilitychange', () => {   // back to the app after
   await refreshStatus();
   if (!L) { try { await fetchLibrary(); } catch (e) { toast(e.message); } }
   render();
+  if (ST?.spotify?.connected && !ST.spotify.broken) Player.preloadSdk();   // ready for the first click
   if (ST?.spotify?.connected && !ST.spotify.broken && (ret || Date.now() - (ST.spotify.last || 0) > 5 * 6e4)) runSync();
 })();
