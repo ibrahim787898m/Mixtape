@@ -1,0 +1,9 @@
+# secrets and personal data never go in this public repo
+.env
+*.key
+*secret*
+*-export*.json
+library*.json
+.dev.vars
+.wrangler/
+node_modules/
