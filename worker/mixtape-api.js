@@ -94,7 +94,7 @@ async function sp(env, d, ctx, path) {
   const r = await fetch(path.startsWith('http') ? path : SP_API + path, { headers: { Authorization: 'Bearer ' + token } });
   if (r.status === 429) { ctx.wait = +r.headers.get('Retry-After') || 30; throw new Budget(); }
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new HttpError(r.status === 401 ? 401 : 502, `Spotify ${r.status}: ${data.error?.message || 'error'}`);
+  if (!r.ok) { const e = new HttpError(r.status === 401 ? 401 : 502, `Spotify ${r.status}: ${data.error?.message || 'error'}`); e.spotify = r.status; throw e; }
   return data;
 }
 class Budget extends Error {}
@@ -156,8 +156,11 @@ async function spStep(env, d, ctx) {
         }
         const pl = await d.prepare('SELECT ext, snap, name FROM playlists WHERE id = ?').bind(job.pl).first();
         if (!pl) { job.pl = null; continue; }
-        const page = await sp(env, d, ctx, `playlists/${pl.ext}/items?limit=100&offset=${job.offset}&fields=${encodeURIComponent(ITEM_FIELDS)}`);
-        if (!Array.isArray(page.items)) {   // Spotify leaves items out for playlists you only follow
+        let page;
+        try { page = await sp(env, d, ctx, `playlists/${pl.ext}/items?limit=100&offset=${job.offset}&fields=${encodeURIComponent(ITEM_FIELDS)}`); }
+        catch (e) { if (e.spotify === 403 || e.spotify === 404) page = { refused: e.spotify }; else throw e; }
+        if (!Array.isArray(page.items)) {   // a playlist you only follow (or one made by Spotify): no items, or 403/404
+          job.refused = (job.refused || 0) + 1;
           await d.batch([d.prepare('UPDATE playlists SET readable = 0, synced = ? WHERE id = ?').bind(pl.snap, job.pl),
             d.prepare('DELETE FROM items WHERE pl = ?').bind(job.pl)]);
           job.pl = null; continue;
@@ -207,7 +210,7 @@ async function spStep(env, d, ctx) {
             await d.prepare(`DELETE FROM items WHERE pl = 'sp:liked'`).run();
             job = { ...job, full: true, offset: 0, fresh: 0 }; continue;
           }
-          const msg = `Spotify synced${job.newSongs || job.fresh ? `: ${job.fresh || 0} new liked song${job.fresh === 1 ? '' : 's'}` : ''}`;
+          const msg = `Spotify synced${job.fresh ? `: ${job.fresh} new liked song${job.fresh === 1 ? '' : 's'}` : ''}${job.refused ? ` (${job.refused} playlist${job.refused === 1 ? '' : 's'} Spotify won't share: followed or made by Spotify)` : ''}`;
           await d.batch([kvSet(d, 'sp.job', { phase: 'done', at: Date.now() }), kvSet(d, 'sp.last', Date.now()), logStmt(d, msg)]);
           return { done: true, msg };
         }
