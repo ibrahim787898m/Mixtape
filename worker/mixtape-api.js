@@ -15,6 +15,8 @@
      POST /youtube/disconnect     → forget the YouTube login (the library stays)
      POST /sync                   → run one sync step; call again while {done:false}
      GET  /library                → the whole library (playlists, tracks, playlist items)
+     GET  /session?d=ID&n=NAME    → the shared "now playing" + the Mixtape devices seen lately (also marks this one as seen)
+     POST /session                {d, op, …}  → change it: start, toggle, next, prev, jump, seek, transfer, report, stop
 
    Settings (Worker → Settings → Variables and Secrets):
      Secret:  APP_KEY            a long random string; the same one goes into Mixtape → Settings
@@ -569,6 +571,78 @@ async function spDisconnect(env) {
   return { ok: true };
 }
 
+/* ---------- Mixtape Connect: one "now playing" shared by every device ----------
+   kv 'sess' = {rev, queue (track ids), index, host (the Mixtape device that plays), spOut (Spotify
+   device it uses for Spotify songs: null = its own default), playing, pos, at (when pos was
+   measured), dur, hostSeen}. Any device changes it with an op (rev goes up); the host follows every
+   new rev and sends 'report' while playing (position, and the next index when a song ends by itself).
+   kv 'devs' = {id: {name, seen, mobile}} for the device picker. */
+const DEV_FRESH = 75e3, QUEUE_MAX = 1000;
+const posNow = s => s.playing ? Math.min(s.dur || Infinity, (s.pos || 0) + (Date.now() - (s.at || Date.now()))) : (s.pos || 0);
+async function session(env, url) {
+  const d = await db(env), id = String(url.searchParams.get('d') || '').slice(0, 40), name = String(url.searchParams.get('n') || '').slice(0, 60);
+  const now = Date.now(), devs = (await kvGet(d, 'devs')) || {};
+  if (id) devs[id] = { name: name || devs[id]?.name || 'Device', seen: now, mobile: url.searchParams.get('m') === '1' };
+  for (const k of Object.keys(devs)) if (now - devs[k].seen > 7 * 864e5) delete devs[k];   // forget devices unused for a week
+  const st = [kvSet(d, 'devs', devs)];
+  // the host checking in: update only hostSeen, in place, so it can't undo a change made meanwhile
+  if (id) st.push(d.prepare(`UPDATE kv SET v = json_set(v, '$.hostSeen', ?) WHERE k = 'sess' AND json_extract(v, '$.host') = ?`).bind(now, id));
+  st.push(d.prepare(`SELECT v FROM kv WHERE k = 'sess'`));
+  const res = await d.batch(st), row = res[res.length - 1].results[0];
+  return { now, session: row ? JSON.parse(row.v) : null, devices: Object.entries(devs).filter(([, v]) => now - v.seen < DEV_FRESH).map(([k, v]) => ({ id: k, ...v })) };
+}
+/* Save only if nobody changed the session since we read it (rev check); otherwise read again and redo. */
+async function sessionOp(env, body) {
+  const d = await db(env);
+  for (let tries = 0; tries < 10; tries++) {
+    if (tries) await new Promise(r => setTimeout(r, 15 + Math.random() * 40 * tries));   // someone else saved first: wait a moment, read again
+    const row = await d.prepare(`SELECT v FROM kv WHERE k = 'sess'`).first(), old = row ? JSON.parse(row.v) : null;
+    const out = applyOp(old, body);
+    if (out.unchanged) return { ok: !out.notHost, notHost: !!out.notHost, now: Date.now(), session: old };
+    const v = JSON.stringify(out.s);
+    const r = old
+      ? await d.prepare(`UPDATE kv SET v = ? WHERE k = 'sess' AND json_extract(v, '$.rev') = ? AND json_extract(v, '$.updated') = ?`).bind(v, old.rev, old.updated).run()
+      : await d.prepare(`INSERT INTO kv (k, v) VALUES ('sess', ?) ON CONFLICT(k) DO NOTHING`).bind(v).run();
+    if (r.meta.changes) return { ok: true, now: Date.now(), session: out.s };
+  }
+  throw new HttpError(409, 'Busy, try again');
+}
+function applyOp(s, body) {
+  const me = String(body?.d || '').slice(0, 40), op = body?.op, now = Date.now();
+  if (!me || !op) throw new HttpError(400, 'Expected {d, op}');
+  // every saved change gets a fresh `updated`, so the rev check above also catches plain reports
+  const bump = patch => ({ s: { ...s, ...patch, rev: (s?.rev || 0) + 1, updated: now } });
+  const keep = patch => ({ s: { ...s, ...patch, updated: now } });
+  if (op === 'start') {               // play this list from index, on this device (or the one given)
+    const queue = (Array.isArray(body.queue) ? body.queue : []).map(String).slice(0, QUEUE_MAX);
+    if (!queue.length) throw new HttpError(400, 'Nothing to play');
+    const index = Math.max(0, Math.min(queue.length - 1, +body.index || 0));
+    return bump({ queue, index, host: String(body.host || me), spOut: body.spOut ?? null, playing: true, pos: 0, at: now, dur: 0, hostSeen: now });
+  }
+  if (!s) throw new HttpError(409, 'Nothing is playing');
+  if (op === 'report') {              // from the host: where it really is
+    if (s.host !== me) return { unchanged: true, notHost: true };
+    const p = { pos: Math.max(0, +body.pos || 0), at: now, dur: +body.dur || s.dur || 0, playing: !!body.playing, hostSeen: now,
+      spDev: body.spDev ? String(body.spDev).slice(0, 80) : s.spDev || null, spOutName: String(body.spOutName || '').slice(0, 60) };
+    if (body.rev !== s.rev) return { unchanged: true };                       // a newer command is on its way to the host
+    if (Number.isInteger(body.index) && body.index !== s.index && body.index >= 0 && body.index < s.queue.length) return bump({ ...p, index: body.index });   // moved on by itself
+    return keep(p);
+  }
+  const pos = posNow(s);
+  switch (op) {
+    case 'toggle': return bump({ playing: !s.playing, pos, at: now });
+    case 'pause': return bump({ playing: false, pos, at: now });
+    case 'resume': return bump({ playing: true, pos, at: now });
+    case 'next': return s.index + 1 < s.queue.length ? bump({ index: s.index + 1, pos: 0, at: now, playing: true }) : { unchanged: true };
+    case 'prev': return bump(pos > 3000 || s.index === 0 ? { pos: 0, at: now } : { index: s.index - 1, pos: 0, at: now, playing: true });
+    case 'jump': { const i = +body.index; return i >= 0 && i < s.queue.length ? bump({ index: i, pos: 0, at: now, playing: true }) : { unchanged: true }; }
+    case 'seek': return bump({ pos: Math.max(0, +body.pos || 0), at: now });
+    case 'transfer': return bump({ host: String(body.host || me), spOut: body.spOut ?? null, pos, at: now, playing: true, hostSeen: now });
+    case 'stop': return s.host === me ? bump({ playing: false, pos, at: now }) : { unchanged: true };
+    default: throw new HttpError(400, 'Unknown op ' + op);
+  }
+}
+
 /* JSON array text of every row, built by SQLite in slices of 1500 rows (a D1 result value must
    stay under 2 MB), then joined here as plain text. */
 async function jsonRows(d, cols, from) {
@@ -624,6 +698,8 @@ export default {
       if (m === 'GET' && p === '/config') return reply({ spotifyClientId: env.SPOTIFY_CLIENT_ID || null, youtube: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET), youtubeKey: !!env.YT_API_KEY });
       if (m === 'GET' && p === '/library') return await library(env, head);
       if (m === 'POST' && p === '/sync') return reply(await syncStep(env));
+      if (m === 'GET' && p === '/session') return reply(await session(env, url));
+      if (m === 'POST' && p === '/session') return reply(await sessionOp(env, await body()));
       if (m === 'POST' && p === '/spotify/connect') return reply(await spConnect(env, await body()));
       if (m === 'POST' && p === '/spotify/disconnect') return reply(await spDisconnect(env));
       if (m === 'POST' && p === '/youtube/start') return reply(await ytStart(env, await body(), url));

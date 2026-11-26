@@ -5,6 +5,8 @@
 import { api, apiCfg, setApiCfg } from './api.js';
 import { spotifyLogin, spotifyReturn, redirectUri } from './spotify.js';
 import * as Player from './player.js';
+import * as Connect from './connect.js';
+import { matchTracks } from './match.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -32,7 +34,7 @@ let ST = null;                         // last /status
 let sync = { busy: false, msg: '' };
 const prefs = Object.assign({ theme: 'dark', sort: 'added', dir: -1, plSort: 'order' }, JSON.parse(localStorage.getItem(PREFK) || '{}'));
 const savePrefs = () => localStorage.setItem(PREFK, JSON.stringify(prefs));
-const F = { q: '', src: 'all', since: 'any', decade: 'any', pl: 'any' };   // filters (per session)
+const F = { q: '', src: 'all', since: 'any', decade: 'any', pl: 'any' };   // src: all | spotify | youtube | both | onlysp | onlyyt   // filters (per session)
 
 function normalise(raw) {
   const playlists = raw.playlists.map(([id, src, name, image, total, owner, kind, readable, gone]) => ({ id, src, name, image, total, owner, kind, readable: !!readable, gone: !!gone }));
@@ -46,8 +48,19 @@ function normalise(raw) {
     t.pls.add(pl);
     if ((added || '') > t.added) t.added = added || '';
   }
-  const inLib = [...tracks.values()].filter(t => t.pls.size);
-  return { playlists, byId: new Map(playlists.map(p => [p.id, p])), tracks, items, all: inLib, at: raw.at };
+  // the same song on both services becomes one song: shown once, played from Spotify (audio only, no ads)
+  const matched = matchTracks(tracks);
+  for (const t of tracks.values()) t.on = new Set([t.src]);
+  for (const y of tracks.values()) {
+    if (y.src !== 'youtube' || !y.alt) continue;
+    const sp = y.alt;
+    y.pls.forEach(p => sp.pls.add(p));if (y.added > sp.added) sp.added = y.added;
+    sp.on.add('youtube');y.on.add('spotify');sp.ytUrl = y.url;sp.s += ' ' + y.s;
+  }
+  // in playlists, a YouTube song that's also on Spotify shows (and plays) as the Spotify one
+  for (const pl of Object.keys(items)) items[pl] = items[pl].map(x => x.t.src === 'youtube' && x.t.alt ? { ...x, t: x.t.alt } : x);
+  const inLib = [...tracks.values()].filter(t => t.pls.size && !(t.src === 'youtube' && t.alt));
+  return { playlists, byId: new Map(playlists.map(p => [p.id, p])), tracks, items, all: inLib, at: raw.at, matched };
 }
 function loadCache() { try { const r = localStorage.getItem(LIBK); if (r) L = normalise(JSON.parse(r)); } catch (e) { L = null; } }
 async function fetchLibrary() {
@@ -77,7 +90,7 @@ function addedTxt(iso) {
 }
 const long = ms => { const m = Math.round(ms / 6e4); return m < 60 ? m + ' min' : `${Math.floor(m / 60)} h${m % 60 ? ' ' + (m % 60) + ' min' : ''}`; };
 const plural = (n, w) => `${n.toLocaleString()} ${w}${n === 1 ? '' : 's'}`;
-function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('on'), 2400); }
+function toast(m, ms = 2400) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('on'), ms); }
 
 /* ---------- routing ---------- */
 const route = () => { const h = location.hash.slice(2); const [v, ...rest] = h.split('/'); return { v: v || 'library', id: decodeURIComponent(rest.join('/')) }; };
@@ -144,7 +157,7 @@ function baseRows(r) {
 function applyFilters(list, inPlaylist) {
   const words = F.q.toLowerCase().split(/\s+/).filter(Boolean), cut = SINCE[F.since] ? new Date(Date.now() - SINCE[F.since] * 864e5).toISOString() : '';
   let out = list.filter(x => (!words.length || words.every(w => x.t.s.includes(w)))
-    && (F.src === 'all' || x.t.src === F.src)
+    && (F.src === 'all' || (F.src === 'both' ? x.t.on.size > 1 : F.src === 'onlysp' ? !x.t.on.has('youtube') : F.src === 'onlyyt' ? !x.t.on.has('spotify') : x.t.on.has(F.src)))
     && (!cut || x.added >= cut)
     && (F.decade === 'any' || (x.t.year && x.t.year.slice(0, 3) === F.decade.slice(0, 3)))
     && (inPlaylist || F.pl === 'any' || x.t.pls.has(F.pl)));
@@ -167,7 +180,7 @@ function viewSongs(r) {
       <span>${plural(base.length, 'song')}</span>·<span>${long(totalDur)}</span>
       </div></div></div>`
     : `<div class="hero"><div><div class="kicker">Everything, in one place</div><h1>Library</h1>
-      <div class="meta"><span>${plural(base.length, 'song')}</span>·<span>${plural(L.playlists.filter(p => !p.gone && p.readable).length, 'playlist')}</span>·<span>${long(totalDur)}</span></div></div></div>`;
+      <div class="meta"><span>${plural(base.length, 'song')}</span>·<span>${plural(L.playlists.filter(p => !p.gone && p.readable).length, 'playlist')}</span>·<span>${long(totalDur)}</span>${L.matched ? `·<span title="Songs you have on both services are shown once and play from Spotify">${plural(L.matched, 'song')} on both</span>` : ''}</div></div></div>`;
   const chip = (k, v, label) => `<button class="chip ${F[k] === v ? 'on' : ''}" data-act="f" data-k="${k}" data-v="${v}">${label}</button>`;
   const sortKey = pl && prefs.plSort === 'order' ? 'order' : prefs.sort;
   const th = (k, label) => `<button class="${sortKey === k ? 'on' : ''}" data-act="sort" data-k="${k}">${label}${sortKey === k && k !== 'order' ? I(prefs.dir > 0 ? 'up' : 'down') : ''}</button>`;
@@ -184,6 +197,7 @@ function viewSongs(r) {
     <div class="tools">
       <label class="search">${I('search')}<input id="q" placeholder="Search songs, artists, albums" value="${esc(F.q)}" autocomplete="off">${F.q ? `<button class="chip" style="height:24px;padding:0 6px;border:0" data-act="clearq" aria-label="Clear">${I('x')}</button>` : ''}</label>
       <div class="chips">${chip('src', 'all', 'All')}${chip('src', 'spotify', '<span class="src spotify" style="margin:0"></span>Spotify')}${chip('src', 'youtube', '<span class="src youtube" style="margin:0"></span>YouTube')}</div>
+      <select class="chip" data-act="fsel" data-k="src" title="Where the song is"><option value="all">On: anywhere</option>${[['both', 'On both'], ['onlysp', 'Only on Spotify'], ['onlyyt', 'Only on YouTube']].map(([v, l]) => `<option value="${v}" ${F.src === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <select class="chip" data-act="fsel" data-k="since"><option value="any">Added: any time</option>${[['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['90d', 'Last 3 months'], ['1y', 'Last year']].map(([v, l]) => `<option value="${v}" ${F.since === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
       ${decades.length > 1 ? `<select class="chip" data-act="fsel" data-k="decade"><option value="any">Any year</option>${decades.map(d => `<option value="${d}" ${F.decade === d ? 'selected' : ''}>${d}</option>`).join('')}</select>` : ''}
       ${!pl && plOpts.length ? `<select class="chip" data-act="fsel" data-k="pl"><option value="any">In any playlist</option>${plOpts.map(p => `<option value="${esc(p.id)}" ${F.pl === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
@@ -200,64 +214,81 @@ function viewSongs(r) {
 /* only the rows in view are in the page, so 10,000 songs scroll smoothly */
 const ROW = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue('--row')) || 58;
 let painted = '';
+/* On phones the whole page scrolls (so pull-to-refresh works); on wider screens the list scrolls in its box. */
+const pageScroll = () => matchMedia('(max-width:860px)').matches;
 function paintRows(force) {
   const list = $('#list'), box = $('#rows');if (!list || !box) return;
-  const h = ROW(), head = 36, top = Math.max(0, list.scrollTop - head), first = Math.max(0, Math.floor(top / h) - 8);
-  const last = Math.min(rows.length, Math.ceil((top + list.clientHeight) / h) + 8);
+  const vTop = pageScroll() ? 0 : list.getBoundingClientRect().top, vH = pageScroll() ? innerHeight : list.clientHeight;
+  const h = ROW(), top = Math.max(0, vTop - box.getBoundingClientRect().top), first = Math.max(0, Math.floor(top / h) - 8);
+  const last = Math.min(rows.length, Math.ceil((top + vH) / h) + 8);
   if (!force && painted === first + ':' + last && box.childElementCount) return;   // same window: nothing to redraw
   painted = first + ':' + last;
   let html = '';
   for (let i = first; i < last; i++) {
-    const x = rows[i], t = x.t, on = t.id === Player.currentId();
-    html += `<div class="row ${on ? 'now' : ''}" data-i="${i}" style="top:${i * h}px" title="Play"><span class="idx">${on && !Player.P.state?.paused ? '<span class="eq"><i></i><i></i><i></i></span>' : `<span class="n">${i + 1}</span>`}${I('play')}</span>
+    const x = rows[i], t = x.t, on = t.id === nowId();
+    html += `<div class="row ${on ? 'now' : ''}" data-i="${i}" style="top:${i * h}px" title="Play"><span class="idx">${on && !Connect.view()?.paused ? '<span class="eq"><i></i><i></i><i></i></span>' : `<span class="n">${i + 1}</span>`}${I('play')}</span>
       <div class="t"><span class="art" style="${t.image ? `background-image:url('${esc(t.image)}')` : ''}"></span><div class="tt"><div class="ti">${esc(t.title)}</div><div class="ar">${esc(t.artists)}</div></div></div>
       <span class="al">${esc(t.album)}</span><span class="add">${esc(addedTxt(x.added))}</span>
-      <span class="srcs"><span class="pill ${t.src}" title="${t.src === 'spotify' ? 'On Spotify' : 'On YouTube Music'}">${t.src === 'spotify' ? 'S' : 'YT'}</span></span>
+      <span class="srcs">${t.on.has('spotify') ? '<span class="pill spotify" title="On Spotify">S</span>' : ''}${t.on.has('youtube') ? `<span class="pill youtube" title="On YouTube Music${t.src === 'spotify' ? ' too (plays from Spotify)' : ''}">YT</span>` : ''}</span>
       <span class="dur">${dur(t.dur)}</span>
       <a class="go" href="${esc(t.url)}" target="_blank" rel="noopener" title="Open in ${t.src === 'spotify' ? 'Spotify' : 'YouTube Music'}">${I('ext')}</a></div>`;
   }
   box.innerHTML = html;
 }
 
-/* ---------- player bar ---------- */
+/* ---------- player bar (shows the shared "now playing", whichever device plays it) ---------- */
 const mmss = ms => dur(ms);
+let devOpen = false, spDevs = null, spDevErr = '';
+const nowId = () => Connect.view()?.t?.id || null;
 function renderPlayer() {
-  const el = $('#player'), P = Player.P, s = P.state;
+  const el = $('#player'), v = Connect.view();
   if (!el) return;
-  if (!P.ctx && !s) { el.hidden = true; document.body.classList.remove('playing'); return; }
+  if (!v) { el.hidden = true; document.body.classList.remove('playing'); return; }
   el.hidden = false;document.body.classList.add('playing');
-  const t = s?.id && L?.tracks.get(s.id);
+  const P = Player.P, here = v.host && P.state;
   el.innerHTML = `
-    <div class="pnow">${s ? `<span class="art" style="background-image:url('${esc(t?.image || s.image)}')"></span>
-      <div class="tt"><div class="ti">${esc(s.title)}</div><div class="ar">${esc(s.artists)}</div></div>` : `<div class="tt"><div class="ar">${P.busy ? 'Starting…' : ''}</div></div>`}</div>
+    <div class="pnow"><span class="art" style="${v.image ? `background-image:url('${esc(v.image)}')` : ''}"></span>
+      <div class="tt"><div class="ti">${esc(v.title || (v.busy ? 'Starting…' : ''))}</div><div class="ar">${esc(v.artists || '')}</div></div></div>
     <div class="pmid">
       <div class="pbtns"><button class="pb" data-act="pPrev" aria-label="Previous">${I('prev')}</button>
-        <button class="pb big" data-act="pToggle" aria-label="${s?.paused === false ? 'Pause' : 'Play'}">${I(s && !s.paused ? 'pause' : 'play')}</button>
+        <button class="pb big" data-act="pToggle" aria-label="${v.paused ? 'Play' : 'Pause'}">${I(v.paused ? 'play' : 'pause')}</button>
         <button class="pb" data-act="pNext" aria-label="Next">${I('next')}</button></div>
-      <div class="pbar"><span class="mono" id="pPos">${mmss(Player.now())}</span>
-        <input type="range" id="pSeek" min="0" max="${s?.dur || 0}" value="${Player.now()}" step="1000" aria-label="Seek">
-        <span class="mono">${mmss(s?.dur || 0)}</span></div>
+      <div class="pbar"><span class="mono" id="pPos">${mmss(v.pos)}</span>
+        <input type="range" id="pSeek" min="0" max="${v.dur || 0}" value="${v.pos}" step="1000" aria-label="Seek">
+        <span class="mono">${mmss(v.dur || 0)}</span></div>
     </div>
-    <div class="pright">${P.src === 'youtube' ? `<button class="pb" data-act="ytSize" title="Bigger / smaller video">${I(P.ytBig ? 'shrink' : 'grow')}</button>` : ''}
-      <span class="pdev" title="Playing on">${P.src === 'youtube' ? '<span class="pill youtube" style="width:auto;padding:0 6px">YT</span>' : I(P.mode === 'connect' ? 'phone' : 'device')}<span>${esc(P.src === 'youtube' ? 'YouTube' : P.device || '')}</span></span>
-      ${P.mode === 'browser' || P.src === 'youtube' ? `<span class="pvol">${I('vol')}<input type="range" id="pVol" min="0" max="1" step="0.05" value="${P.vol}" aria-label="Volume"></span>` : ''}</div>`;
+    <div class="pright">${here && P.src === 'youtube' ? `<button class="pb" data-act="ytSize" title="Bigger / smaller video">${I(P.ytBig ? 'shrink' : 'grow')}</button>` : ''}
+      <button class="pdev ${v.host ? '' : 'remote'} ${v.offline ? 'off' : ''}" data-act="devPick" title="Choose where to play">${I(v.host ? 'device' : 'phone')}<span>${esc(v.where)}</span>${I('up')}</button>
+      ${here && (P.mode === 'browser' || P.src === 'youtube') ? `<span class="pvol">${I('vol')}<input type="range" id="pVol" min="0" max="1" step="0.05" value="${P.vol}" aria-label="Volume"></span>` : ''}</div>
+    ${devOpen ? devPopup(v) : ''}`;
   const seekEl = $('#pSeek');
   seekEl.oninput = () => { seekEl._drag = true; $('#pPos').textContent = mmss(+seekEl.value); };
-  seekEl.onchange = () => { seekEl._drag = false; Player.seek(+seekEl.value).catch(e => toast(e.message)); };
-  const v = $('#pVol');if (v) v.oninput = () => Player.setVolume(+v.value);
-  if (P.error) { toast(P.error); P.error = ''; }
+  seekEl.onchange = () => { seekEl._drag = false; Connect.seek(+seekEl.value).catch(playErr); };
+  const vol = $('#pVol');if (vol) vol.oninput = () => Player.setVolume(+vol.value);
+  if (P.error) { toast(P.error, 5000); P.error = ''; }
+  else if (P.tip) { toast(P.tip, 9000); P.tip = ''; }
+}
+function devPopup(v) {
+  const s = Connect.C.s, mix = Connect.C.devices;
+  const isHere = id => s?.host === id && !s?.spOut;
+  return `<div class="devpop" role="menu"><div class="dh">Playing on</div>
+    ${mix.map(d => `<button class="di ${isHere(d.id) ? 'on' : ''}" data-act="devTo" data-mix="${esc(d.id)}">${I(d.mobile ? 'phone' : 'device')}<span class="grow">${esc(d.name)}${d.id === Connect.me ? ' <span class="faint">(this device)</span>' : ''}</span><span class="faint">Mixtape</span></button>`).join('')}
+    <div class="dh">Spotify devices</div>
+    ${spDevs === null ? `<div class="faint dn">${spDevErr ? esc(spDevErr) : 'Looking…'}</div>` : spDevs.length ? spDevs.map(d => `<button class="di ${s?.spOut === d.id ? 'on' : ''}" data-act="devTo" data-sp="${esc(d.id)}">${I(/smartphone|tablet/i.test(d.type) ? 'phone' : 'device')}<span class="grow">${esc(d.name)}</span><span class="faint">${esc(d.type)}</span></button>`).join('')
+      : '<div class="faint dn">None open. Open Spotify on a phone, computer or TV to see it here.</div>'}
+    <div class="faint dn" style="font-size:12px">YouTube songs always play in a Mixtape tab (YouTube's rules).</div></div>`;
 }
 setInterval(() => {           // move the seek bar between updates
-  const s = Player.P.state, el = $('#pSeek');
-  if (!s || !el || el._drag) return;
-  el.value = Player.now();$('#pPos').textContent = mmss(Player.now());
+  const v = Connect.view(), el = $('#pSeek');
+  if (!v || !el || el._drag) return;
+  el.value = v.pos;$('#pPos').textContent = mmss(v.pos);
 }, 500);
 let lastPlaying = null;
-Player.onPlayerChange(() => {
+function playerChanged() {
   renderPlayer();
-  const key = Player.currentId() + ':' + Player.P.state?.paused;
+  const v = Connect.view(), key = nowId() + ':' + v?.paused;
   if (key !== lastPlaying) { lastPlaying = key; paintRows(true); }
-});
+}
 const playErr = e => toast(e.message);
 
 /* ---------- settings / onboarding ---------- */
@@ -296,7 +327,7 @@ function youtubeCard() {
           <span class="faint mono" style="font-size:12px">${l.total != null ? plural(l.total, 'song') : ''}</span>
           <button class="chip" style="height:28px;padding:0 9px" data-act="ytRemove" data-id="${esc(l.id)}" title="Stop following">${I('x')}</button></div>`).join('')}</div>
         <div class="btns"><button class="btn" data-act="sync" ${sync.busy ? 'disabled' : ''}>${I('sync')} Sync now</button></div>` : ''}
-      <p class="faint" style="font-size:12.5px;margin-top:12px">Liked music is private on YouTube, so it can't be read without a Google sign-in (which Advanced Protection blocks). Tip: add songs to a playlist like "Mixtape Likes" instead.${on ? ` Last sync ${esc(ago(s.last))}.` : ''}</p>`}</div>`;
+      <p class="faint" style="font-size:12.5px;margin-top:12px">Liked music is private on YouTube, so it can't be read without a Google sign-in (which Advanced Protection blocks). Tip: add songs to a playlist like "Mixtape Likes" instead. Songs you also have on Spotify play from Spotify (no video, no ads). Seeing ads on YouTube-only songs in Firefox? Click the shield left of the address bar and turn off Enhanced Tracking Protection for this site, so the player sees your YouTube Premium login.${on ? ` Last sync ${esc(ago(s.last))}.` : ''}</p>`}</div>`;
   }
   return `<div class="card"><h3><span class="src youtube" style="margin:0;width:10px;height:10px"></span>YouTube Music
       <span class="status ${s?.broken ? 'bad' : on ? 'on' : 'off'}">${s?.broken ? '● sign in again' : on ? '● connected' : '○ not connected'}</span></h3>
@@ -311,6 +342,8 @@ function viewSettings() {
   return `<div class="wrap"><h2>Settings</h2><p class="muted">Services, sync and this device.</p><div class="grid">
     ${workerCard(false)}${spotifyCard()}
     ${youtubeCard()}
+    <div class="card"><h3>This device</h3><p>Its name in the "Playing on" list on your other devices.</p>
+      <div class="field" style="flex-direction:row;gap:8px"><input id="devName" value="${esc(Connect.devName())}" maxlength="40" style="flex:1"><button class="btn" data-act="devName">Save</button></div></div>
     <div class="card"><h3>Appearance</h3><div class="chips">${['dark', 'light', 'auto'].map(t => `<button class="chip ${prefs.theme === t ? 'on' : ''}" data-act="theme" data-v="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}</div></div>
     <div class="card"><h3>Recent activity</h3>${log.length ? `<div class="log">${log.map(l => `<div><span>${esc(new Date(l.at).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(l.msg)}</div>`).join('')}</div>` : '<p>Nothing yet.</p>'}</div>
   </div></div>`;
@@ -327,17 +360,19 @@ function render() {
   document.documentElement.dataset.theme = prefs.theme === 'auto' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : prefs.theme;
   renderSide();
   const r = route(), main = $('#main');
-  const keepScroll = main.dataset.route === location.hash ? $('#list')?.scrollTop : 0;
+  const same = main.dataset.route === location.hash, keepScroll = same ? $('#list')?.scrollTop : 0, keepY = same ? scrollY : 0;
   if (r.v === 'settings') main.innerHTML = viewSettings();
   else if (!apiCfg() || !L || (!L.all.length && !anyOn())) main.innerHTML = viewWelcome();
   else main.innerHTML = viewSongs(r);
   main.dataset.route = location.hash;
   const list = $('#list');
   if (list) { list.scrollTop = keepScroll || 0; list.onscroll = () => paintRows(); paintRows(true); }
+  if (pageScroll()) scrollTo(0, keepY);
   const q = $('#q');
   if (q) q.oninput = () => { F.q = q.value; clearTimeout(q._t); q._t = setTimeout(() => { const pos = q.selectionStart; render(); const n = $('#q'); n.focus(); n.setSelectionRange(pos, pos); }, 120); };
 }
 window.addEventListener('resize', () => paintRows());
+window.addEventListener('scroll', () => { if (pageScroll()) paintRows(); }, { passive: true });
 
 /* ---------- sync ---------- */
 async function refreshStatus() { try { ST = await api('/status'); } catch (e) { ST = ST || null; sync.msg = e.message; } }
@@ -367,16 +402,22 @@ const A = {
   sort: d => { if (d.k === prefs.sort) prefs.dir = -prefs.dir; else { prefs.sort = d.k; prefs.dir = d.k === 'added' ? -1 : 1; } prefs.plSort = 'custom'; savePrefs(); render(); },
   theme: d => { prefs.theme = d.v; savePrefs(); render(); },
   sync: () => runSync(true),
-  pToggle: () => Player.toggle().catch(playErr),
-  pNext: () => Player.next().catch(playErr),
-  pPrev: () => Player.prev().catch(playErr),
+  pToggle: () => Connect.toggle()?.catch(playErr),
+  pNext: () => Connect.next()?.catch(playErr),
+  pPrev: () => Connect.prev()?.catch(playErr),
+  devPick: () => {
+    devOpen = !devOpen;renderPlayer();
+    if (devOpen) { spDevs = null; spDevErr = ''; Player.spotifyDevices().then(l => { spDevs = l; }, e => { spDevs = null; spDevErr = e.message; }).finally(renderPlayer); }
+  },
+  devTo: d => { devOpen = false; renderPlayer(); Connect.transfer(d.sp ? { spotify: d.sp } : { mixtape: d.mix })?.catch(playErr); },
+  devName: () => { Connect.setDevName($('#devName').value); Connect.refresh(); toast('Saved: ' + Connect.devName()); render(); },
   ytSize: () => { Player.toggleYtSize(); renderPlayer(); },
   async wSave() {
     const url = $('#wUrl').value.trim().replace(/\/+$/, ''), key = $('#wKey').value.trim() || apiCfg()?.key || '';
     const err = $('#wErr');err.textContent = '';
     if (!/^https:\/\/[^\s/]+$/.test(url) && !/^http:\/\/127\.0\.0\.1:\d+$/.test(url)) { err.textContent = 'Paste the Worker address, like https://mixtape-api.you.workers.dev'; return; }
     if (key.length < 24) { err.textContent = 'The app key looks too short'; return; }
-    try { ST = await api('/status', undefined, { url, key }); setApiCfg({ url, key }); toast('Worker connected'); await fetchLibrary(); render(); if (anyOn()) runSync(); }
+    try { ST = await api('/status', undefined, { url, key }); setApiCfg({ url, key }); toast('Worker connected'); await fetchLibrary(); render(); Connect.init({ resolve: id => L?.tracks.get(id) || null, onChange: playerChanged }); if (anyOn()) runSync(); }
     catch (e) { err.textContent = e.message; }
   },
   wOff: () => { if (!confirm('Forget the Worker on this device? Nothing in the Worker or your music apps changes.')) return; setApiCfg(null); localStorage.removeItem(LIBK); L = null; ST = null; render(); },
@@ -409,9 +450,10 @@ const A = {
   },
 };
 document.addEventListener('click', e => {
+  if (devOpen && !e.target.closest('.devpop') && !e.target.closest('[data-act=devPick]')) { devOpen = false; renderPlayer(); }
   const row = e.target.closest('.row');
   if (row && !e.target.closest('a')) {   // click a song: play from here
-    Player.playList(rows.map(x => x.t), +row.dataset.i).catch(playErr); return;
+    Connect.play(rows.map(x => x.t), +row.dataset.i).catch(playErr); return;
   }
   const el = e.target.closest('[data-act]'); if (!el || el.tagName === 'SELECT') return; const f = A[el.dataset.act]; if (f) { e.preventDefault(); f(el.dataset, e); }
 });
@@ -424,7 +466,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && document.activeElement.id === 'ytLink') { e.preventDefault(); A.ytAdd(); return; }
   if (e.key === '/' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { const q = $('#q'); if (q) { e.preventDefault(); q.focus(); } }
   if (e.key === 'Escape' && document.activeElement.id === 'q') { F.q = ''; render(); }
-  if (e.key === ' ' && Player.P.ctx && !/INPUT|SELECT|TEXTAREA|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); Player.toggle().catch(playErr); }
+  if (e.key === ' ' && Connect.C.s && !/INPUT|SELECT|TEXTAREA|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); Connect.toggle()?.catch(playErr); }
 });
 document.addEventListener('visibilitychange', () => {   // back to the app after a while: catch up
   if (!document.hidden && apiCfg() && anyOn() && Date.now() - lastSync() > 10 * 6e4) runSync();
@@ -450,5 +492,6 @@ document.addEventListener('visibilitychange', () => {   // back to the app after
   render();
   if (ST?.spotify?.connected && !ST.spotify.broken) Player.preloadSdk();   // ready for the first click
   if (ST?.youtube?.connected) Player.preloadYt();
+  Connect.init({ resolve: id => L?.tracks.get(id) || null, onChange: playerChanged });
   if (anyOn() && (ret || ytRet === 'ok' || Date.now() - lastSync() > 5 * 6e4)) runSync();
 })();

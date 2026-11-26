@@ -109,6 +109,8 @@ Open **http://127.0.0.1:8000/** (not `localhost`, so it matches the Spotify redi
 | Sign-in mode: "blocked by Advanced Protection" | Expected: use the API key (section 8) |
 
 ## Updating the Worker code
+26 Nov 2026, Mixtape Connect: new `/session` endpoints (shared now playing across devices). Just redeploy; nothing to set up.
+
 When `mixtape-api.js` changes: Worker → **Edit code** → replace everything → **Deploy**. Settings,
 bindings and the database are kept.
 

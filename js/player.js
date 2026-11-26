@@ -13,11 +13,14 @@ const SP = 'https://api.spotify.com/v1/';
 const BATCH = 50;
 export const P = { src: null, mode: null, ready: false, deviceId: null, device: '', state: null, ctx: null, error: '', busy: false,
   vol: +(localStorage.getItem('mixtape.vol') ?? 0.7), ytBig: localStorage.getItem('mixtape.ytbig') === '1' };
-let sdk = null, player = null, onChange = () => {}, tokenCache = { t: '', exp: 0 }, poll = null, ending = false;
+let sdk = null, player = null, tokenCache = { t: '', exp: 0 }, poll = null, ending = false;
 let ytApi = null, ytp = null, ytTick = null;
 
-export function onPlayerChange(fn) { onChange = fn; }
-const emit = () => onChange();
+const listeners = [];
+export function onPlayerChange(fn) { listeners.push(fn); }
+const emit = () => listeners.forEach(f => f());
+let devName = 'Mixtape';
+export const setDeviceName = n => { devName = n; };
 const mobile = () => /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 
 /* ================= Spotify ================= */
@@ -56,14 +59,22 @@ export function preloadSdk() {
 }
 
 /* Make this tab a Spotify device. Resolves true when ready, false if it can't (then use Connect). */
+let browserStart = null;
 function startBrowser() {
-  if (P.mode === 'browser' && P.ready) return Promise.resolve(true);
+  if (P.sdkDevice) return Promise.resolve(true);
+  if (browserStart) return browserStart;
+  browserStart = startBrowser2().then(ok => { if (!ok) browserStart = null; return ok; });
+  return browserStart;
+}
+/* Call inside a click: browsers only let a page start sound right after the user did something. */
+export function primeFromClick() { if (!mobile() && window.Spotify?.Player && !P.sdkDevice) startBrowser(); }
+function startBrowser2() {
   if (mobile() || !window.Spotify?.Player) return Promise.resolve(false);
   return new Promise(res => {
     let done = false;const finish = v => { if (!done) { done = true; res(v); } };
-    player = new window.Spotify.Player({ name: 'Mixtape', volume: P.vol, getOAuthToken: cb => token().then(cb).catch(e => { P.error = e.message; emit(); }) });
+    player = new window.Spotify.Player({ name: 'Mixtape · ' + devName, volume: P.vol, getOAuthToken: cb => token().then(cb).catch(e => { P.error = e.message; emit(); }) });
     player.activateElement?.();            // inside the click, so the browser allows sound
-    player.addListener('ready', ({ device_id }) => { P.mode = 'browser'; P.ready = true; P.deviceId = device_id; P.device = 'This browser'; emit(); finish(true); });
+    player.addListener('ready', ({ device_id }) => { P.sdkDevice = device_id; P.mode = 'browser'; P.ready = true; P.deviceId = device_id; P.device = 'This device'; emit(); finish(true); });
     player.addListener('not_ready', () => { P.ready = false; emit(); });
     player.addListener('initialization_error', () => finish(false));          // e.g. DRM switched off
     player.addListener('authentication_error', ({ message }) => { P.error = 'Spotify sign-in problem: ' + message; emit(); finish(false); });
@@ -99,14 +110,29 @@ function syncIndex() {
   if (k >= 0) c.index = c.start + k;
 }
 
-/* Connect mode: find a device (the active one, else a phone/computer running Spotify). */
-async function pickDevice() {
+/* Spotify devices you can play on (Mixtape tabs are listed by Mixtape itself, so they're left out). */
+export async function spotifyDevices() {
   const d = await web('me/player/devices');
-  const list = (d?.devices || []).filter(x => !x.is_restricted);
-  const dev = list.find(x => x.is_active) || list.find(x => /smartphone/i.test(x.type) && mobile()) || list[0];
-  if (!dev) throw new Error('No Spotify device found. Open the Spotify app on this device, then press play again.');
+  return (d?.devices || []).filter(x => !x.is_restricted && !/^Mixtape · /.test(x.name || ''));
+}
+/* Where Spotify songs play when no device was picked: THIS phone's Spotify app, or this computer's
+   Spotify app if the browser can't play. Never "whatever happens to be active" (that's how a song
+   could play silently on a TV or a forgotten tab). */
+async function pickDevice() {
+  const list = await spotifyDevices();
+  const want = mobile() ? x => /smartphone|tablet/i.test(x.type) : x => /computer/i.test(x.type);
+  const dev = list.filter(want).sort((a, b) => b.is_active - a.is_active)[0];
+  if (!dev) throw new Error(mobile() ? 'Open the Spotify app on this phone (it can stay in the background), then press play again. Or pick a device under "Playing on".'
+    : 'This browser can\'t play Spotify (in Firefox: allow DRM content). Or pick a device under "Playing on".');
   P.mode = 'connect';P.deviceId = dev.id;P.device = dev.name;P.ready = true;
   return dev.id;
+}
+export function setSpotifyOut(id) { if ((id || null) !== (P.spOut || null)) { P.spOut = id || null; P.outChanged = true; } }
+async function useDevice(id) {
+  const list = await spotifyDevices().catch(() => []);
+  const dev = list.find(x => x.id === id);
+  if (!dev) throw new Error("That Spotify device isn't available any more. Open Spotify on it, or pick another under \"Playing on\".");
+  P.mode = 'connect';P.deviceId = id;P.device = dev.name;P.ready = true;
 }
 async function pollConnect() {
   clearTimeout(poll);
@@ -169,6 +195,10 @@ function ytState(t) {   // refresh P.state from the YouTube player
 }
 async function ytPlay(t) {
   await loadYt();
+  if (/Firefox\//.test(navigator.userAgent) && !localStorage.getItem('mixtape.fxtip')) {   // why YouTube may show ads here
+    localStorage.setItem('mixtape.fxtip', '1');
+    P.tip = 'Seeing ads? Firefox hides your YouTube login from players inside other sites. Click the shield left of the address bar and turn off Enhanced Tracking Protection for Mixtape.';
+  }
   const vid = t.id.slice(3);
   ytBox(true);
   P.src = 'youtube';P.device = 'YouTube';
@@ -215,16 +245,35 @@ async function playIndex(i) {
   // Spotify: send the run of consecutive Spotify songs starting here
   if (P.src === 'youtube') ytStop();
   P.src = 'spotify';
-  if (!(P.ready && P.deviceId && (P.mode === 'browser' || P.mode === 'connect'))) {
+  if (P.spOut) { if (P.outChanged || P.deviceId !== P.spOut) await useDevice(P.spOut); }
+  else if (P.outChanged || !(P.ready && P.deviceId)) {
     const ok = await (preloadSdk().then(() => startBrowser(), () => false));
-    if (!ok) await pickDevice();
+    if (ok) { P.mode = 'browser'; P.deviceId = P.sdkDevice; P.device = 'This device'; } else await pickDevice();
   }
+  P.outChanged = false;
   const run = [];
   for (let k = i; k < c.list.length && run.length < BATCH && c.list[k].src === 'spotify'; k++) run.push('spotify:track:' + c.list[k].id.slice(3));
   c.start = i;c.batch = run;
-  P.device = P.mode === 'browser' ? 'This browser' : P.device;
+  P.device = P.mode === 'browser' ? 'This device' : P.device;
   await web('me/player/play?device_id=' + encodeURIComponent(P.deviceId), 'PUT', { uris: run, offset: { position: 0 } });
   if (P.mode === 'connect') { setTimeout(pollConnect, 700); }
+}
+
+/* The queue, without playing yet (Connect then calls playIndex). */
+export function load(tracks) { P.ctx = { list: tracks.slice(), index: 0, start: 0, batch: [] }; }
+export { playIndex };
+export async function pauseAll() {
+  if (P.src === 'youtube') { try { ytp?.pauseVideo(); } catch (e) {} }
+  else if (P.src === 'spotify') await spotifyPause();
+  if (P.state) { P.state.pos = now(); P.state.paused = true; P.state.at = Date.now(); }
+  emit();
+}
+export async function resume() {
+  if (P.src === 'youtube') { ytp?.playVideo(); return; }
+  if (P.mode === 'browser') await player?.resume();
+  else await web('me/player/play?device_id=' + encodeURIComponent(P.deviceId), 'PUT');
+  if (P.state) { P.state.paused = false; P.state.at = Date.now(); }
+  emit();setTimeout(pollConnect, 600);
 }
 
 /* Start playing `tracks` (Mixtape track objects, in list order) from index i. */
@@ -283,8 +332,4 @@ function media() {
     navigator.mediaSession.metadata = new MediaMetadata({ title: P.state.title, artist: P.state.artists, artwork: P.state.image ? [{ src: P.state.image, sizes: '300x300' }] : [] });
     navigator.mediaSession.playbackState = P.state.paused ? 'paused' : 'playing';
   } catch (e) { /* not supported */ }
-}
-if ('mediaSession' in navigator) {
-  const h = (a, f) => { try { navigator.mediaSession.setActionHandler(a, () => f().catch(() => {})); } catch (e) {} };
-  h('play', toggle);h('pause', toggle);h('nexttrack', next);h('previoustrack', prev);
 }
