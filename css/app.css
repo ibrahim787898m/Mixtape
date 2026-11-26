@@ -41,6 +41,7 @@ main{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden
 .plfilter:focus{border-color:var(--line2)}
 .pl{flex:1;overflow:auto;min-height:0;display:flex;flex-direction:column;gap:1px;margin:0 -4px;padding:0 4px}
 .pl a{padding:6px 8px}
+.followed a{opacity:.72}.followed a:hover,.followed a.on{opacity:1}
 .pl .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px}
 .thumb{width:34px;height:34px;border-radius:7px;background:var(--panel2) center/cover;flex:none;display:grid;place-items:center;color:var(--faint)}
 .thumb.liked{background:linear-gradient(135deg,#6d4aff,#ff5c8a);color:#fff}

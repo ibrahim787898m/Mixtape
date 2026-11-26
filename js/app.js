@@ -75,9 +75,14 @@ window.addEventListener('hashchange', () => { $('#app').classList.remove('drawer
 /* ---------- sidebar ---------- */
 let plQuery = '';
 function renderSide() {
-  const r = route(), lists = (L?.playlists || []).filter(p => !p.gone && p.kind !== 'liked');
+  const r = route(), all = (L?.playlists || []).filter(p => !p.gone && p.kind !== 'liked');
+  const lists = all.filter(p => p.readable), followed = all.filter(p => !p.readable);
   const liked = L?.byId.get('sp:liked');
-  const shown = lists.filter(p => !plQuery || p.name.toLowerCase().includes(plQuery));
+  const match = p => !plQuery || p.name.toLowerCase().includes(plQuery);
+  const shown = lists.filter(match), shownF = followed.filter(match);
+  const link = p => `<a href="#/pl/${encodeURIComponent(p.id)}" class="${r.id === p.id ? 'on' : ''}" title="${esc(p.name)}">
+        <span class="thumb" style="${p.image ? `background-image:url('${esc(p.image)}')` : ''}">${p.image ? '' : I('note')}</span>
+        <span class="nm">${esc(p.name)}</span><span class="src ${p.src}"></span></a>`;
   const dot = sync.busy ? 'busy' : ST?.spotify?.broken ? 'err' : ST?.spotify?.connected ? 'ok' : '';
   $('#syncDotM').className = 'syncdot ' + dot;
   $('#side').innerHTML = `
@@ -88,11 +93,11 @@ function renderSide() {
       <a href="#/settings" class="${r.v === 'settings' ? 'on' : ''}">${I('gear')} Settings</a>
     </nav>
     <div class="sechead">Playlists <span class="grow"></span><span class="mono">${lists.length || ''}</span></div>
-    ${lists.length > 8 ? `<input class="plfilter" id="plq" placeholder="Find a playlist" value="${esc(plQuery)}">` : ''}
-    <div class="pl">${shown.map(p => `<a href="#/pl/${encodeURIComponent(p.id)}" class="${r.id === p.id ? 'on' : ''}" title="${esc(p.name)}">
-        <span class="thumb" style="${p.image ? `background-image:url('${esc(p.image)}')` : ''}">${p.image ? '' : I('note')}</span>
-        <span class="nm">${esc(p.name)}</span><span class="src ${p.src}"></span></a>`).join('')
-      || `<div class="faint" style="padding:6px 10px;font-size:13px">${L ? 'No playlists match.' : 'Connect a service to see your playlists.'}</div>`}</div>
+    ${all.length > 8 ? `<input class="plfilter" id="plq" placeholder="Find a playlist" value="${esc(plQuery)}">` : ''}
+    <div class="pl">${shown.map(link).join('')
+      || `<div class="faint" style="padding:6px 10px;font-size:13px">${L ? (plQuery ? 'No playlists match.' : 'No playlists of your own yet.') : 'Connect a service to see your playlists.'}</div>`}
+      ${followed.length ? `<div class="sechead" style="margin-top:16px" title="Made by other people or by Spotify. Spotify doesn't share their songs with apps.">Followed on Spotify <span class="grow"></span><span class="mono">${followed.length}</span></div>
+        <div class="followed">${shownF.map(link).join('') || '<div class="faint" style="padding:6px 10px;font-size:13px">No playlists match.</div>'}</div>` : ''}</div>
     <div class="sidefoot"><span class="syncdot ${dot}"></span><span class="grow muted" id="syncTxt">${esc(syncLine())}</span>
       ${apiCfg() && ST?.spotify?.connected ? `<button class="iconbtn" style="width:32px;height:32px;border-radius:9px;border:1px solid var(--line);background:var(--panel);display:grid;place-items:center;cursor:pointer" data-act="sync" title="Sync now" ${sync.busy ? 'disabled' : ''}>${I('sync')}</button>` : ''}</div>`;
   const q = $('#plq');
@@ -147,12 +152,21 @@ function viewSongs(r) {
       <div><div class="kicker">${liked ? 'Liked songs' : 'Playlist'}</div><h1>${esc(pl.name)}</h1>
       <div class="meta"><span class="badge ${pl.src}">${pl.src === 'spotify' ? 'Spotify' : 'YouTube Music'}</span>${pl.owner && !liked ? `<span>by ${esc(pl.owner)}</span>·` : ''}
       <span>${plural(base.length, 'song')}</span>·<span>${long(totalDur)}</span>
-      ${!pl.readable ? '<span class="badge">Followed playlist: Spotify only shares songs of playlists you own or collaborate on</span>' : ''}</div></div></div>`
+      </div></div></div>`
     : `<div class="hero"><div><div class="kicker">Everything, in one place</div><h1>Library</h1>
-      <div class="meta"><span>${plural(base.length, 'song')}</span>·<span>${plural(L.playlists.filter(p => !p.gone).length, 'playlist')}</span>·<span>${long(totalDur)}</span></div></div></div>`;
+      <div class="meta"><span>${plural(base.length, 'song')}</span>·<span>${plural(L.playlists.filter(p => !p.gone && p.readable).length, 'playlist')}</span>·<span>${long(totalDur)}</span></div></div></div>`;
   const chip = (k, v, label) => `<button class="chip ${F[k] === v ? 'on' : ''}" data-act="f" data-k="${k}" data-v="${v}">${label}</button>`;
   const sortKey = pl && prefs.plSort === 'order' ? 'order' : prefs.sort;
   const th = (k, label) => `<button class="${sortKey === k ? 'on' : ''}" data-act="sort" data-k="${k}">${label}${sortKey === k && k !== 'order' ? I(prefs.dir > 0 ? 'up' : 'down') : ''}</button>`;
+  if (pl && !pl.readable) {
+    const open = pl.src === 'spotify' ? 'https://open.spotify.com/playlist/' + encodeURIComponent(pl.id.replace(/^sp:/, '')) : '#';
+    return `<div class="page">${hero.replace(`<span>${plural(base.length, 'song')}</span>·<span>${long(totalDur)}</span>`, '<span>Followed</span>')}
+      <div class="wrap" style="padding-top:6px"><div class="card" style="max-width:620px">
+        <h3>Spotify doesn't share this playlist's songs</h3>
+        <p>It was made by ${pl.owner ? esc(pl.owner) : 'someone else'}, and since February 2026 Spotify only lets apps read playlists you created or collaborate on.</p>
+        <p style="margin-top:10px"><b>To have it in Mixtape:</b> in Spotify, open it → select all songs → right-click → <b>Add to playlist</b> → <b>New playlist</b>. Your copy shows up here on the next sync (it won't follow changes to the original). If a friend made it, ask them to make you a collaborator instead: that stays live.</p>
+        <div class="btns"><a class="btn sp" href="${open}" target="_blank" rel="noopener">${I('ext')} Open in Spotify</a></div></div></div></div>`;
+  }
   return `<div class="page">${hero}
     <div class="tools">
       <label class="search">${I('search')}<input id="q" placeholder="Search songs, artists, albums" value="${esc(F.q)}" autocomplete="off">${F.q ? `<button class="chip" style="height:24px;padding:0 6px;border:0" data-act="clearq" aria-label="Clear">${I('x')}</button>` : ''}</label>
