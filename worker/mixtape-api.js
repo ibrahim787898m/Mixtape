@@ -121,7 +121,6 @@ function spTrack(t) {
    and stop at the first song already known; if the total then doesn't match, a full re-read. */
 async function spStep(env, d, ctx) {
   let job = await kvGet(d, 'sp.job');
-  const me = await kvGet(d, 'sp.me');
   if (!job || job.phase === 'done') job = { phase: 'lists', next: 'me/playlists?limit=50', seen: [], queue: [], started: Date.now(), newSongs: 0 };
   try {
     while (true) {
@@ -130,21 +129,22 @@ async function spStep(env, d, ctx) {
         const rows = [];
         for (const p of page.items || []) {
           if (!p) continue;
-          const mine = p.owner?.id === me?.id || p.collaborative;
+          // Which playlists share their songs isn't guessed from owner ids (they don't match /me's id
+          // for every account): the playlist step asks Spotify, and a reply without items = followed only.
           rows.push({ id: 'sp:' + p.id, ext: p.id, name: p.name || 'Untitled', image: pickImage(p.images), snap: p.snapshot_id,
-            total: p.items?.total ?? p.tracks?.total ?? 0, owner: p.owner?.display_name || '', readable: mine ? 1 : 0 });
+            total: p.items?.total ?? p.tracks?.total ?? 0, owner: p.owner?.display_name || '' });
           job.seen.push('sp:' + p.id);
         }
         if (rows.length) await d.prepare(`INSERT INTO playlists (id, src, ext, name, image, snap, total, owner, kind, readable, gone, updated)
-          SELECT j->>'id', 'spotify', j->>'ext', j->>'name', j->>'image', j->>'snap', j->>'total', j->>'owner', 'playlist', j->>'readable', 0, ?
+          SELECT j->>'id', 'spotify', j->>'ext', j->>'name', j->>'image', j->>'snap', j->>'total', j->>'owner', 'playlist', 1, 0, ?
           FROM (SELECT value AS j FROM json_each(?)) WHERE true
           ON CONFLICT(id) DO UPDATE SET name = excluded.name, image = excluded.image, snap = excluded.snap, total = excluded.total,
-            owner = excluded.owner, readable = excluded.readable, gone = 0, updated = excluded.updated`).bind(Date.now(), JSON.stringify(rows)).run();
+            owner = excluded.owner, gone = 0, updated = excluded.updated`).bind(Date.now(), JSON.stringify(rows)).run();
         job.next = page.next;
         if (!job.next) {
           // playlists no longer in the list: mark gone (kept, so nothing disappears by surprise)
           await d.prepare(`UPDATE playlists SET gone = 1 WHERE src = 'spotify' AND kind = 'playlist' AND id NOT IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(job.seen)).run();
-          const { results } = await d.prepare(`SELECT id FROM playlists WHERE src = 'spotify' AND kind = 'playlist' AND gone = 0 AND readable = 1 AND (synced IS NULL OR synced != snap)`).all();
+          const { results } = await d.prepare(`SELECT id FROM playlists WHERE src = 'spotify' AND kind = 'playlist' AND gone = 0 AND (synced IS NULL OR synced != snap)`).all();
           job = { ...job, phase: 'playlist', queue: results.map(r => r.id), seen: [], pl: null };
         }
         continue;
@@ -157,6 +157,11 @@ async function spStep(env, d, ctx) {
         const pl = await d.prepare('SELECT ext, snap, name FROM playlists WHERE id = ?').bind(job.pl).first();
         if (!pl) { job.pl = null; continue; }
         const page = await sp(env, d, ctx, `playlists/${pl.ext}/items?limit=100&offset=${job.offset}&fields=${encodeURIComponent(ITEM_FIELDS)}`);
+        if (!Array.isArray(page.items)) {   // Spotify leaves items out for playlists you only follow
+          await d.batch([d.prepare('UPDATE playlists SET readable = 0, synced = ? WHERE id = ?').bind(pl.snap, job.pl),
+            d.prepare('DELETE FROM items WHERE pl = ?').bind(job.pl)]);
+          job.pl = null; continue;
+        }
         const tracks = [], items = [];
         (page.items || []).forEach((x, i) => {
           const t = spTrack(x.item || x.track);
@@ -168,7 +173,7 @@ async function spStep(env, d, ctx) {
         job.offset += (page.items || []).length;
         if (!page.next) {
           st.push(d.prepare('DELETE FROM items WHERE pl = ? AND pos >= ?').bind(job.pl, job.offset),
-            d.prepare('UPDATE playlists SET synced = ?, total = ? WHERE id = ?').bind(pl.snap, page.total ?? job.offset, job.pl));
+            d.prepare('UPDATE playlists SET synced = ?, total = ?, readable = 1 WHERE id = ?').bind(pl.snap, page.total ?? job.offset, job.pl));
           job.pl = null;
         }
         if (st.length) await d.batch(st);
@@ -262,7 +267,7 @@ async function spConnect(env, body) {
   const r = await fetch(SP_API + 'me', { headers: { Authorization: 'Bearer ' + token } });
   const me = await r.json().catch(() => ({}));
   if (!r.ok) throw new HttpError(502, 'Spotify /me failed: ' + (me.error?.message || r.status));
-  await d.batch([kvSet(d, 'sp.me', { id: me.id, display_name: me.display_name }), kvDel(d, 'sp.job'), logStmt(d, `Spotify connected (${me.display_name || me.id})`)]);
+  await d.batch([kvSet(d, 'sp.me', { id: me.id, account_id: me.account_id || null, display_name: me.display_name }), kvDel(d, 'sp.job'), logStmt(d, `Spotify connected (${me.display_name || me.id})`)]);
   return { ok: true, name: me.display_name || me.id };
 }
 

@@ -24,7 +24,7 @@ Never paste the app key or any token into a file, a chat, or a commit.
 1. https://developer.spotify.com/dashboard → **Create app**.
    - Name `Mixtape`, any description.
    - **Redirect URIs**: add both
-     - the live site, e.g. `https://ibrahim787898m.github.io/mixtape/` (exactly, with the final `/`)
+     - the live site, e.g. `https://ibrahim787898m.github.io/Mixtape/` (exactly, with the final `/`)
      - `http://127.0.0.1:8000/` for testing on your computer (Spotify doesn't accept `localhost`)
    - APIs used: tick **Web API** and **Web Playback SDK**.
 2. Save, then copy the **Client ID** (it isn't secret; you don't need the client secret).
@@ -46,9 +46,9 @@ Then **Deploy**.
 Worker → **Settings** → **Triggers** → **Cron Triggers** → **Add** → `*/15 * * * *` → **Add**.
 
 ## 6. Put the app online
-1. Push this repo to GitHub as `mixtape` (public: there are no secrets in it).
+1. Push this repo to GitHub as `Mixtape` (public: there are no secrets in it).
 2. Repo → **Settings** → **Pages** → Source: **Deploy from a branch** → `main` / root → Save.
-3. After a minute the app is at `https://ibrahim787898m.github.io/mixtape/`.
+3. After a minute the app is at `https://ibrahim787898m.github.io/Mixtape/`.
 
 ## 7. Connect
 1. Open the app → paste the Worker address and the app key → **Connect**.

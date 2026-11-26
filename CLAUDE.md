@@ -19,7 +19,7 @@ One library for the owner's Spotify and YouTube Music songs. New songs added to 
 - Icons: inline SVG through `I('name')` (the `ICONS` map in `js/app.js`).
 
 ## Data model (D1)
-`kv` (logins, sync cursor, lock) · `playlists` (id `sp:<id>` / `sp:liked`, snapshot `snap` vs last read `synced`, `readable` = owned/collaborative, `gone`) · `tracks` (id `sp:<trackId>`, ISRC for matching later) · `items` (pl, pos, track, added; liked songs use pos = save time ×10 so new likes never shift old rows) · `log`.
+`kv` (logins, sync cursor, lock) · `playlists` (id `sp:<id>` / `sp:liked`, snapshot `snap` vs last read `synced`, `readable` = Spotify returned its items (decided by asking, never by comparing owner ids with `/me`: they don't match for every account), `gone`) · `tracks` (id `sp:<trackId>`, ISRC for matching later) · `items` (pl, pos, track, added; liked songs use pos = save time ×10 so new likes never shift old rows) · `log`.
 
 ## Testing (no Node here)
 - Worker: run the Worker file in headless Chrome against **real SQLite** through a small local Python server that executes the D1 statements, with Spotify faked in the page (paging, followed playlists, local files/episodes, edits, un-likes, 429, `invalid_grant`, two syncs at once).
